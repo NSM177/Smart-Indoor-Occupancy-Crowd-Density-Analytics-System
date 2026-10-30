@@ -1,0 +1,163 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: smart_occupancy_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-occupancy_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-occupancy_secret_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_occupancy_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-occupancy_admin} -d ${POSTGRES_DB:-smart_occupancy_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - occupancy_net
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: smart_occupancy_mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+      - "${MQTT_WS_PORT:-9001}:9001"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -i healthcheck -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - occupancy_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smart_occupancy_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-occupancy_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-occupancy_secret_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-smart_occupancy_db}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      BACKEND_PORT: 4000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3002,http://127.0.0.1:3002,http://localhost:3000,http://127.0.0.1:3000}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-smart_occupancy_super_secret_jwt_key_2026_change_in_prod}
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-Admin@123}
+      DEFAULT_OPERATOR_USERNAME: ${DEFAULT_OPERATOR_USERNAME:-operator}
+      DEFAULT_OPERATOR_PASSWORD: ${DEFAULT_OPERATOR_PASSWORD:-Operator@123}
+      AI_SERVICE_URL: http://ai-service:8000
+      OCCUPANCY_LOG_INTERVAL_SEC: ${OCCUPANCY_LOG_INTERVAL_SEC:-5}
+      INITIAL_ROOM_NAME: ${INITIAL_ROOM_NAME:-Main Conference & Exhibition Hall}
+      INITIAL_ROOM_AREA_SQM: ${INITIAL_ROOM_AREA_SQM:-120.0}
+      INITIAL_ROOM_MAX_CAPACITY: ${INITIAL_ROOM_MAX_CAPACITY:-60}
+      INITIAL_CAMERA_NAME: ${INITIAL_CAMERA_NAME:-Primary Overhead Camera 01}
+      INITIAL_CAMERA_STREAM_URL: ${INITIAL_CAMERA_STREAM_URL:-0}
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    networks:
+      - occupancy_net
+
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: smart_occupancy_ai
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      AI_SERVICE_HOST: 0.0.0.0
+      AI_SERVICE_PORT: 8000
+      BACKEND_INTERNAL_URL: http://backend:4000/api/v1
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      YOLO_MODEL_PATH: ${YOLO_MODEL_PATH:-yolov8n.pt}
+      YOLO_CONFIDENCE_THRESHOLD: ${YOLO_CONFIDENCE_THRESHOLD:-0.35}
+      YOLO_IOU_THRESHOLD: ${YOLO_IOU_THRESHOLD:-0.45}
+      BYTETRACK_TRACK_BUFFER: ${BYTETRACK_TRACK_BUFFER:-30}
+      HEATMAP_GRID_WIDTH: ${HEATMAP_GRID_WIDTH:-64}
+      HEATMAP_GRID_HEIGHT: ${HEATMAP_GRID_HEIGHT:-36}
+      HEATMAP_DECAY_FACTOR: ${HEATMAP_DECAY_FACTOR:-0.96}
+      TELEMETRY_PUBLISH_INTERVAL_SEC: ${TELEMETRY_PUBLISH_INTERVAL_SEC:-1.0}
+    ports:
+      - "${AI_SERVICE_PORT:-8008}:8000"
+    networks:
+      - occupancy_net
+
+  iot-service:
+    build:
+      context: ./iot-service
+      dockerfile: Dockerfile
+    container_name: smart_occupancy_iot
+    restart: unless-stopped
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      IOT_DEVICE_ID: ${IOT_DEVICE_ID:-RPI_NODE_01}
+      IOT_DEVICE_NAME: ${IOT_DEVICE_NAME:-Raspberry Pi 5 Edge Controller}
+      GPIO_PIN_LED_GREEN: ${GPIO_PIN_LED_GREEN:-17}
+      GPIO_PIN_LED_YELLOW: ${GPIO_PIN_LED_YELLOW:-27}
+      GPIO_PIN_LED_RED: ${GPIO_PIN_LED_RED:-22}
+      GPIO_PIN_BUZZER: ${GPIO_PIN_BUZZER:-23}
+      IOT_HEARTBEAT_INTERVAL_SEC: ${IOT_HEARTBEAT_INTERVAL_SEC:-10}
+    networks:
+      - occupancy_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:4000/api/v1}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:4000/ws/realtime}
+        VITE_AI_SERVICE_URL: ${VITE_AI_SERVICE_URL:-http://localhost:8008}
+    container_name: smart_occupancy_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:4000/api/v1}
+      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:4000/ws/realtime}
+      VITE_AI_SERVICE_URL: ${VITE_AI_SERVICE_URL:-http://localhost:8008}
+    ports:
+      - "${FRONTEND_PORT:-3002}:3000"
+    networks:
+      - occupancy_net
+
+volumes:
+  postgres_data:
+
+networks:
+  occupancy_net:
+    driver: bridge

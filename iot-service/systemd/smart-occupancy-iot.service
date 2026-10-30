@@ -1,0 +1,21 @@
+[Unit]
+Description=Smart Indoor Occupancy & Crowd Density IoT Edge Service (Raspberry Pi 4/5)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/smart-occupancy/iot-service
+EnvironmentFile=/opt/smart-occupancy/iot-service/.env
+ExecStart=/usr/bin/python3 -m app.main
+Restart=always
+RestartSec=5
+WatchdogSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

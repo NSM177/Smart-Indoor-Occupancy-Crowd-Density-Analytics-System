@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs & runtime data
+*.log
+npm-debug.log*
+mosquitto/data/*
+!mosquitto/data/.gitkeep
+mosquitto/log/*
+!mosquitto/log/.gitkeep
+postgres_data/
+
+# AI weights & temporary outputs
+*.pt
+!ai-service/models/.gitkeep
+*.onnx
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

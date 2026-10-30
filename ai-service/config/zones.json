@@ -1,0 +1,72 @@
+{
+  "roomId": "default-room-01",
+  "roomName": "Main Conference & Exhibition Hall",
+  "areaSqm": 120.0,
+  "maxCapacity": 60,
+  "warningDensityThreshold": 0.35,
+  "criticalDensityThreshold": 0.50,
+  "hysteresisRatio": 0.10,
+  "sustainViolationSec": 2.0,
+  "virtualLines": [
+    {
+      "id": "line-main-entrance",
+      "name": "Main Entrance Gate",
+      "start": { "x": 0.05, "y": 0.50 },
+      "end": { "x": 0.35, "y": 0.50 },
+      "inDirection": "DOWN"
+    }
+  ],
+  "zones": [
+    {
+      "id": "zone-a",
+      "name": "Zone A - Khu vực Cửa vào & Lễ tân",
+      "code": "ZONE_A",
+      "polygonPoints": [
+        { "x": 0.03, "y": 0.08 },
+        { "x": 0.34, "y": 0.08 },
+        { "x": 0.34, "y": 0.92 },
+        { "x": 0.03, "y": 0.92 }
+      ],
+      "areaSqm": 40.0,
+      "maxCapacity": 20,
+      "warningDensityThreshold": 0.35,
+      "criticalDensityThreshold": 0.50,
+      "colorHex": "#3B82F6",
+      "isActive": true
+    },
+    {
+      "id": "zone-b",
+      "name": "Zone B - Sảnh Trung tâm",
+      "code": "ZONE_B",
+      "polygonPoints": [
+        { "x": 0.36, "y": 0.08 },
+        { "x": 0.66, "y": 0.08 },
+        { "x": 0.66, "y": 0.92 },
+        { "x": 0.36, "y": 0.92 }
+      ],
+      "areaSqm": 40.0,
+      "maxCapacity": 20,
+      "warningDensityThreshold": 0.35,
+      "criticalDensityThreshold": 0.50,
+      "colorHex": "#10B981",
+      "isActive": true
+    },
+    {
+      "id": "zone-c",
+      "name": "Zone C - Khu vực Sân khấu & Lối ra",
+      "code": "ZONE_C",
+      "polygonPoints": [
+        { "x": 0.68, "y": 0.08 },
+        { "x": 0.97, "y": 0.08 },
+        { "x": 0.97, "y": 0.92 },
+        { "x": 0.68, "y": 0.92 }
+      ],
+      "areaSqm": 40.0,
+      "maxCapacity": 20,
+      "warningDensityThreshold": 0.35,
+      "criticalDensityThreshold": 0.50,
+      "colorHex": "#F59E0B",
+      "isActive": true
+    }
+  ]
+}
