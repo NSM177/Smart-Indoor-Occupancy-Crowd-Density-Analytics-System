@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
   Check,
@@ -194,6 +194,57 @@ function getSeverityStrokeAndFill(
   return { stroke: fallbackHex || '#10b981', fill: 'rgba(16, 185, 129, 0.20)' };
 }
 
+/** Same color ramp the per-cell DOM grid used: sky < 0.4 ≤ amber < 0.75 ≤ rose. */
+function heatmapCellRgba(value: number): [number, number, number, number] {
+  const v = Math.min(1, Math.max(0, value));
+  if (v < 0.05) return [0, 0, 0, 0];
+  if (v < 0.4) return [14, 165, 233, v * 0.8];
+  if (v < 0.75) return [245, 158, 11, v * 0.85];
+  return [244, 63, 94, v * 0.9];
+}
+
+/**
+ * Paints the AI heatmap grid into a canvas (one pixel per cell, scaled up with
+ * pixelated rendering) instead of creating one DOM node per cell (64×36 = 2,304).
+ */
+const HeatmapCanvas = React.memo(function HeatmapCanvas({
+  grid,
+}: {
+  grid: number[][];
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rows = grid.length;
+  const cols = grid[0]?.length || 0;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx || rows === 0 || cols === 0) return;
+    const image = ctx.createImageData(cols, rows);
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        const [red, green, blue, alpha] = heatmapCellRgba(grid[r][c] ?? 0);
+        const offset = (r * cols + c) * 4;
+        image.data[offset] = red;
+        image.data[offset + 1] = green;
+        image.data[offset + 2] = blue;
+        image.data[offset + 3] = Math.round(alpha * 255);
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+  }, [grid, rows, cols]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={cols}
+      height={rows}
+      className="absolute inset-0 w-full h-full opacity-60 pointer-events-none"
+      style={{ imageRendering: 'pixelated' }}
+    />
+  );
+});
+
 export const InteractiveFloorPlan: React.FC<InteractiveFloorPlanProps> = ({
   zones,
   zoneMetrics,
@@ -235,30 +286,7 @@ export const InteractiveFloorPlan: React.FC<InteractiveFloorPlanProps> = ({
       <div className="relative aspect-video bg-slate-950 border border-slate-800 rounded-xl overflow-hidden">
         {/* Optional raw 2D heatmap grid from AI Engine */}
         {showHeatmap && hasRawHeatmap && heatmapGrid && (
-          <div
-            className="absolute inset-0 grid opacity-60 pointer-events-none"
-            style={{
-              gridTemplateRows: `repeat(${heatmapGrid.length}, minmax(0, 1fr))`,
-              gridTemplateColumns: `repeat(${heatmapGrid[0]?.length || 32}, minmax(0, 1fr))`,
-            }}
-          >
-            {heatmapGrid.map((row, rIdx) =>
-              row.map((val, cIdx) => {
-                const v = Math.min(1, Math.max(0, val));
-                const bg =
-                  v < 0.05
-                    ? 'transparent'
-                    : v < 0.4
-                      ? `rgba(14, 165, 233, ${v * 0.8})`
-                      : v < 0.75
-                        ? `rgba(245, 158, 11, ${v * 0.85})`
-                        : `rgba(244, 63, 94, ${v * 0.9})`;
-                return (
-                  <div key={`${rIdx}-${cIdx}`} style={{ backgroundColor: bg }} />
-                );
-              }),
-            )}
-          </div>
+          <HeatmapCanvas grid={heatmapGrid} />
         )}
 
         <svg

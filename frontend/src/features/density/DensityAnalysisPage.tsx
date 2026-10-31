@@ -21,14 +21,14 @@ import {
   useRoomDetailQuery,
   useUpdateZoneMutation,
 } from '../../hooks/useDomainQueries';
-import { useRealtimeStore } from '../../stores/realtimeStore';
+import { useLiveHeatmap } from '../../hooks/useRealtimeWebSocket';
 import { useUIStore } from '../../stores/uiStore';
 import { ZoneEntity } from '../../types';
 import { formatDensity, formatPercentage } from '../../utils/formatters';
 
 export const DensityAnalysisPage: React.FC = () => {
   const selectedRoomId = useUIStore((s) => s.selectedRoomId);
-  const liveRoom = useRealtimeStore((s) => s.liveRooms[selectedRoomId]);
+  const liveHeatmap = useLiveHeatmap(selectedRoomId);
 
   const roomQuery = useRoomDetailQuery(selectedRoomId);
   const denQuery = useCurrentDensityQuery(selectedRoomId);
@@ -51,7 +51,7 @@ export const DensityAnalysisPage: React.FC = () => {
   const zoneMetrics = den?.zones || [];
   const busiest = den?.busiest_zone || null;
   const heatmapGrid =
-    liveRoom?.heatmap_grid || aiDirectQuery.data?.heatmap_grid;
+    liveHeatmap || aiDirectQuery.data?.heatmap_grid;
 
   const openThresholdEditor = (z: ZoneEntity) => {
     setEditingZone(z);

@@ -3,12 +3,16 @@ import { wsClientSingleton } from '../lib/websocket';
 import { useRealtimeStore } from '../stores/realtimeStore';
 import { useUIStore } from '../stores/uiStore';
 
+/**
+ * Owns the WebSocket connection for the layout and exposes only the
+ * connection/alert state the layout renders. Live room telemetry is read by
+ * pages through `useLiveRoomMetrics`, so the layout does not re-render on
+ * every telemetry frame.
+ */
 export function useRealtimeWebSocket() {
   const selectedRoomId = useUIStore((s) => s.selectedRoomId);
   const connectionStatus = useRealtimeStore((s) => s.connectionStatus);
   const isStale = useRealtimeStore((s) => s.isStale);
-  const lastMessageAt = useRealtimeStore((s) => s.lastMessageAt);
-  const liveRooms = useRealtimeStore((s) => s.liveRooms);
   const liveAlerts = useRealtimeStore((s) => s.liveAlerts);
   const unreadAlertCount = useRealtimeStore((s) => s.unreadAlertCount);
 
@@ -25,14 +29,21 @@ export function useRealtimeWebSocket() {
     wsClientSingleton.switchRoom(selectedRoomId);
   }, [selectedRoomId]);
 
-  const currentRoomLive = liveRooms[selectedRoomId] || null;
-
   return {
     connectionStatus,
     isStale,
-    lastMessageAt,
-    currentRoomLive,
     liveAlerts,
     unreadAlertCount,
   };
+}
+
+/** Opt into the heatmap stream while mounted and return the room's latest grid. */
+export function useLiveHeatmap(roomKey: string): number[][] | undefined {
+  useEffect(() => {
+    wsClientSingleton.acquireHeatmap();
+    return () => {
+      wsClientSingleton.releaseHeatmap();
+    };
+  }, []);
+  return useRealtimeStore((s) => s.liveHeatmaps[roomKey]);
 }

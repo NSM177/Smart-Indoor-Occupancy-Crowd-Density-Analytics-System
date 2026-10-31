@@ -36,7 +36,7 @@ import {
   useOccupancyHistoryQuery,
   usePeakHoursQuery,
 } from '../../hooks/useDomainQueries';
-import { useRealtimeStore } from '../../stores/realtimeStore';
+import { useLiveRoomMetrics } from '../../stores/realtimeStore';
 import { useUIStore } from '../../stores/uiStore';
 import {
   formatDateTime,
@@ -46,7 +46,7 @@ import {
 
 export const DashboardOverviewPage: React.FC = () => {
   const selectedRoomId = useUIStore((s) => s.selectedRoomId);
-  const liveRoom = useRealtimeStore((s) => s.liveRooms[selectedRoomId]);
+  const liveRoom = useLiveRoomMetrics(selectedRoomId);
 
   const occQuery = useCurrentOccupancyQuery(selectedRoomId);
   const denQuery = useCurrentDensityQuery(selectedRoomId);

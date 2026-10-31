@@ -454,12 +454,21 @@ def test_05_websocket_broadcast_and_error_isolation(client: TestClient):
     # Verify broken client isolation in WebSocketManager
     manager = WebSocketManager()
 
+    manager.SEND_TIMEOUT_SEC = 0.05
+
     class BrokenSocket:
         async def accept(self):
             pass
 
-        async def send_json(self, data):
+        async def send_text(self, text):
             raise RuntimeError("Simulated socket broken pipe")
+
+    class StalledSocket:
+        async def accept(self):
+            pass
+
+        async def send_text(self, text):
+            await asyncio.sleep(5)
 
     class HealthySocket:
         def __init__(self):
@@ -468,23 +477,45 @@ def test_05_websocket_broadcast_and_error_isolation(client: TestClient):
         async def accept(self):
             pass
 
-        async def send_json(self, data):
-            self.messages.append(data)
+        async def send_text(self, text):
+            self.messages.append(json.loads(text))
 
     broken = BrokenSocket()
+    stalled = StalledSocket()
     healthy = HealthySocket()
+    heatmap_viewer = HealthySocket()
 
     async def run_isolation_check():
         await manager.connect(broken, client_id="bad_client")
+        await manager.connect(stalled, client_id="slow_client")
         await manager.connect(healthy, client_id="good_client")
-        assert manager.active_count == 2
+        assert manager.active_count == 3
         delivered = await manager.broadcast_event(
             "occupancy.updated", {"current_count": 15}
         )
+        # Broken and stalled clients are dropped without blocking the healthy one
         assert delivered == 1
         assert manager.active_count == 1
         assert len(healthy.messages) == 1
         assert healthy.messages[0]["event"] == "occupancy.updated"
+
+        # Heatmap events only reach clients that opted in
+        await manager.connect(heatmap_viewer, client_id="heatmap_client")
+        await manager.handle_client_message(
+            "heatmap_client", {"type": "subscribeHeatmap", "enabled": True}
+        )
+        delivered = await manager.broadcast_event(
+            "heatmap.updated", {"heatmap_grid": [[0.1]]}, heatmap_only=True
+        )
+        assert delivered == 1
+        assert len(healthy.messages) == 1
+        assert heatmap_viewer.messages[-1]["event"] == "heatmap.updated"
+
+        # Clients that stop pinging are evicted by the liveness sweep
+        manager.IDLE_TIMEOUT_SEC = 0.0
+        await asyncio.sleep(0.01)
+        assert await manager.evict_idle_clients() == 2
+        assert manager.active_count == 0
 
     asyncio.run(run_isolation_check())
 
@@ -936,3 +967,82 @@ def test_12_mqtt_ingest_load_reduction(db_session_factory):
     second = run("occupancy/room1/device/status", status, 300.01)
     assert first["status"] == "processed"
     assert second["status"] == "skipped_duplicate"
+
+
+# ============================================================================
+# 13. Realtime Path Hardening (DB work off the event loop, heatmap event,
+#     one alert per sustained episode)
+# ============================================================================
+
+def test_13_realtime_path_hardening(db_session_factory, monkeypatch):
+    import threading
+
+    import app.mqtt.worker as worker_module
+
+    loop_thread = threading.get_ident()
+    session_threads = set()
+
+    def tracking_session_factory():
+        session_threads.add(threading.get_ident())
+        return db_session_factory()
+
+    broadcasts = []
+
+    class RecordingManager:
+        async def broadcast_event(self, event, data, room_id=None, heatmap_only=False):
+            broadcasts.append((event, data, heatmap_only))
+            return 1
+
+    monkeypatch.setattr(worker_module, "ws_manager", RecordingManager())
+    worker = MqttAsyncWorker(
+        session_factory=tracking_session_factory, dedup_window_sec=0.0
+    )
+
+    def telemetry(ts: float, total: int) -> dict:
+        return asyncio.run(
+            worker.process_raw_message(
+                topic="ai/rooms/room1/telemetry",
+                payload_str=json.dumps(
+                    {
+                        "roomId": "room1",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "totalCount": total,
+                        "heatmapGrid": [[0.123456, 0.5], [0.0, 1.0]],
+                    }
+                ),
+                retain=False,
+                received_monotonic=ts,
+            )
+        )
+
+    # A. Blocking DB sessions are opened in worker threads, not on the loop thread
+    assert telemetry(100.0, 10)["status"] == "processed"
+    assert session_threads and loop_thread not in session_threads
+
+    # B. Heatmap is split out of `occupancy.updated`, rounded and throttled
+    telemetry(101.0, 10)
+    telemetry(100.0 + worker.HEATMAP_BROADCAST_INTERVAL_SEC, 10)
+    occupancy_events = [b for b in broadcasts if b[0] == "occupancy.updated"]
+    heatmap_events = [b for b in broadcasts if b[0] == "heatmap.updated"]
+    assert len(occupancy_events) == 3
+    assert all("heatmap_grid" not in data for _, data, _ in occupancy_events)
+    assert len(heatmap_events) == 2
+    assert all(flag for _, _, flag in heatmap_events)
+    assert heatmap_events[0][1]["heatmap_grid"][0][0] == 0.123
+    assert worker.get_live_heatmap("room1")["room_code"] == "room1"
+
+    # C. A sustained CRITICAL episode produces a single alert, not one per 30s
+    telemetry(200.0, 80)
+    telemetry(260.0, 80)
+    telemetry(320.0, 80)
+    db = db_session_factory()
+    try:
+        crowd_alerts = (
+            db.query(Alert)
+            .filter(Alert.alert_type == "CROWD_DENSITY_THRESHOLD")
+            .all()
+        )
+        assert len(crowd_alerts) == 1
+        assert crowd_alerts[0].severity == "CRITICAL"
+    finally:
+        db.close()

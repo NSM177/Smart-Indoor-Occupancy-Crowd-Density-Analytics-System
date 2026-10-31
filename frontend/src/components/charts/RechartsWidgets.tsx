@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   Area,
   AreaChart,
@@ -26,19 +26,23 @@ import { formatTimeShort } from '../../utils/formatters';
 // ============================================================================
 // 1. Occupancy Trend Area Chart
 // ============================================================================
-export const OccupancyTrendChart: React.FC<{
+const OccupancyTrendChartView: React.FC<{
   records: OccupancyRecord[];
   maxCapacity: number;
 }> = ({ records, maxCapacity }) => {
-  const data = records
-    .slice()
-    .reverse()
-    .map((r) => ({
-      time: formatTimeShort(r.recorded_at),
-      total: r.total_count,
-      inCount: r.in_count,
-      outCount: r.out_count,
-    }));
+  const data = useMemo(
+    () =>
+      records
+        .slice()
+        .reverse()
+        .map((r) => ({
+          time: formatTimeShort(r.recorded_at),
+          total: r.total_count,
+          inCount: r.in_count,
+          outCount: r.out_count,
+        })),
+    [records],
+  );
 
   return (
     <div className="h-64 w-full">
@@ -92,18 +96,22 @@ export const OccupancyTrendChart: React.FC<{
 // ============================================================================
 // 2. Density Trend Line Chart
 // ============================================================================
-export const DensityTrendChart: React.FC<{
+const DensityTrendChartView: React.FC<{
   records: OccupancyRecord[];
   criticalDensity: number;
 }> = ({ records, criticalDensity }) => {
-  const data = records
-    .slice()
-    .reverse()
-    .map((r) => ({
-      time: formatTimeShort(r.recorded_at),
-      density: Number(r.overall_density.toFixed(3)),
-      ratioPct: Number((r.capacity_ratio * 100).toFixed(1)),
-    }));
+  const data = useMemo(
+    () =>
+      records
+        .slice()
+        .reverse()
+        .map((r) => ({
+          time: formatTimeShort(r.recorded_at),
+          density: Number(r.overall_density.toFixed(3)),
+          ratioPct: Number((r.capacity_ratio * 100).toFixed(1)),
+        })),
+    [records],
+  );
 
   return (
     <div className="h-64 w-full">
@@ -151,14 +159,18 @@ export const DensityTrendChart: React.FC<{
 // ============================================================================
 // 3. Peak Hours Bar Chart
 // ============================================================================
-export const PeakHoursBarChart: React.FC<{
+const PeakHoursBarChartView: React.FC<{
   items: PeakHourItem[];
 }> = ({ items }) => {
-  const data = items.map((item) => ({
-    hour: `${String(item.hour_of_day).padStart(2, '0')}:00`,
-    avgCount: item.avg_count,
-    maxCount: item.max_count,
-  }));
+  const data = useMemo(
+    () =>
+      items.map((item) => ({
+        hour: `${String(item.hour_of_day).padStart(2, '0')}:00`,
+        avgCount: item.avg_count,
+        maxCount: item.max_count,
+      })),
+    [items],
+  );
 
   return (
     <div className="h-64 w-full">
@@ -198,16 +210,20 @@ export const PeakHoursBarChart: React.FC<{
 // ============================================================================
 // 4. Zone Comparison Bar Chart
 // ============================================================================
-export const ZoneComparisonBarChart: React.FC<{
+const ZoneComparisonBarChartView: React.FC<{
   zones: ZoneDensitySnapshot[];
 }> = ({ zones }) => {
-  const data = zones.map((z) => ({
-    code: z.zone_code,
-    name: z.zone_name,
-    personCount: z.person_count,
-    maxCapacity: z.max_capacity,
-    density: Number(z.density_per_sqm.toFixed(2)),
-  }));
+  const data = useMemo(
+    () =>
+      zones.map((z) => ({
+        code: z.zone_code,
+        name: z.zone_name,
+        personCount: z.person_count,
+        maxCapacity: z.max_capacity,
+        density: Number(z.density_per_sqm.toFixed(2)),
+      })),
+    [zones],
+  );
 
   return (
     <div className="h-64 w-full">
@@ -247,15 +263,19 @@ export const ZoneComparisonBarChart: React.FC<{
 // ============================================================================
 // 5. OLS Short-Term Forecast Composed Chart
 // ============================================================================
-export const ForecastConfidenceChart: React.FC<{
+const ForecastConfidenceChartView: React.FC<{
   predictions: ForecastPoint[];
 }> = ({ predictions }) => {
-  const data = predictions.map((p) => ({
-    offset: `+${p.minute_offset}m`,
-    predicted: p.predicted_count,
-    low: p.confidence_low,
-    high: p.confidence_high,
-  }));
+  const data = useMemo(
+    () =>
+      predictions.map((p) => ({
+        offset: `+${p.minute_offset}m`,
+        predicted: p.predicted_count,
+        low: p.confidence_low,
+        high: p.confidence_high,
+      })),
+    [predictions],
+  );
 
   return (
     <div className="h-64 w-full">
@@ -305,3 +325,11 @@ export const ForecastConfidenceChart: React.FC<{
     </div>
   );
 };
+
+// Memoized so live WebSocket updates of the parent page do not rebuild the
+// chart data or re-render Recharts unless the chart inputs actually changed.
+export const OccupancyTrendChart = React.memo(OccupancyTrendChartView);
+export const DensityTrendChart = React.memo(DensityTrendChartView);
+export const PeakHoursBarChart = React.memo(PeakHoursBarChartView);
+export const ZoneComparisonBarChart = React.memo(ZoneComparisonBarChartView);
+export const ForecastConfidenceChart = React.memo(ForecastConfidenceChartView);

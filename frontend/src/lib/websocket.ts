@@ -23,6 +23,7 @@ class RealtimeWebSocketSingleton {
   private activeRoomId = 'room1';
   private isIntentionalClose = false;
   private subscriberCount = 0;
+  private heatmapSubscriberCount = 0;
 
   public acquire(roomId: string): void {
     this.subscriberCount += 1;
@@ -48,6 +49,21 @@ class RealtimeWebSocketSingleton {
     if (!roomId || roomId === this.activeRoomId) return;
     this.activeRoomId = roomId;
     this.subscribeRoom(roomId);
+  }
+
+  /** The ~10 KB heatmap stream is opt-in; only mounted heatmap views request it. */
+  public acquireHeatmap(): void {
+    this.heatmapSubscriberCount += 1;
+    if (this.heatmapSubscriberCount === 1) {
+      this.sendHeatmapSubscription(true);
+    }
+  }
+
+  public releaseHeatmap(): void {
+    this.heatmapSubscriberCount = Math.max(0, this.heatmapSubscriberCount - 1);
+    if (this.heatmapSubscriberCount === 0) {
+      this.sendHeatmapSubscription(false);
+    }
   }
 
   private connect(): void {
@@ -76,6 +92,9 @@ class RealtimeWebSocketSingleton {
       this.reconnectAttempts = 0;
       useRealtimeStore.getState().setConnectionStatus('CONNECTED');
       this.subscribeRoom(this.activeRoomId);
+      if (this.heatmapSubscriberCount > 0) {
+        this.sendHeatmapSubscription(true);
+      }
       this.startHeartbeat();
     };
 
@@ -138,6 +157,21 @@ class RealtimeWebSocketSingleton {
       return;
     }
 
+    if (envelope.event === 'heatmap.updated' && envelope.data) {
+      const data = envelope.data as {
+        room_id?: string;
+        room_code?: string;
+        heatmap_grid?: number[][];
+      };
+      if (Array.isArray(data.heatmap_grid)) {
+        store.updateHeatmap(
+          [roomKey, data.room_id ?? '', data.room_code ?? ''],
+          data.heatmap_grid,
+        );
+      }
+      return;
+    }
+
     if (envelope.event === 'alert.created' && envelope.data) {
       const alertObj = envelope.data as unknown as AlertEntity;
       store.pushLiveAlert(alertObj);
@@ -174,6 +208,12 @@ class RealtimeWebSocketSingleton {
           roomId,
         }),
       );
+    }
+  }
+
+  private sendHeatmapSubscription(enabled: boolean): void {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({ type: 'subscribeHeatmap', enabled }));
     }
   }
 

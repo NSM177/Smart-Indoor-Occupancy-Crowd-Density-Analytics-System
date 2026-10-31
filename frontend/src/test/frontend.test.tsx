@@ -1,12 +1,12 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { act, render, renderHook, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { StatCard } from '../components/dashboard/StatCard';
 import { InteractiveFloorPlan } from '../components/monitoring/SpatialWidgets';
 import { SectionCard, StatusBadge } from '../components/ui/Primitives';
 import { SIDEBAR_NAV_ITEMS } from '../layouts/MainLayout';
 import { useAuthStore } from '../stores/authStore';
-import { useRealtimeStore } from '../stores/realtimeStore';
+import { useLiveRoomMetrics, useRealtimeStore } from '../stores/realtimeStore';
 import { useUIStore } from '../stores/uiStore';
 import {
   computeNormalizedPolygonArea,
@@ -199,5 +199,69 @@ describe('3. UI & Spatial Monitoring Components', () => {
     expect(screen.getByText('38')).toBeInTheDocument();
     expect(screen.getByText('CRITICAL')).toBeInTheDocument();
     expect(screen.getByText(/ZONE_A • 16\/18 người/i)).toBeInTheDocument();
+  });
+});
+
+describe('Realtime rendering performance (Phase 1)', () => {
+  it('useLiveRoomMetrics re-renders only when a displayed KPI changes', () => {
+    useRealtimeStore.setState({ liveRooms: {} });
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders += 1;
+      return useLiveRoomMetrics('room_perf');
+    });
+    expect(result.current).toBeNull();
+
+    const frame = {
+      room_id: 'room_perf',
+      room_code: 'room_perf',
+      current_count: 12,
+      in_count: 20,
+      out_count: 8,
+      overall_density: 0.1,
+      capacity_ratio: 0.2,
+      room_status: 'NORMAL' as const,
+    };
+    act(() => useRealtimeStore.getState().updateRoomOccupancy('room_perf', frame));
+    expect(result.current?.current_count).toBe(12);
+    const rendersAfterFirstFrame = renders;
+
+    // Same KPIs again (new object, new zones/updated_at) -> no re-render
+    act(() =>
+      useRealtimeStore.getState().updateRoomOccupancy('room_perf', {
+        ...frame,
+        zones: [],
+        updated_at: new Date().toISOString(),
+      }),
+    );
+    expect(renders).toBe(rendersAfterFirstFrame);
+
+    act(() =>
+      useRealtimeStore
+        .getState()
+        .updateRoomOccupancy('room_perf', { ...frame, current_count: 13 }),
+    );
+    expect(renders).toBe(rendersAfterFirstFrame + 1);
+    expect(result.current?.current_count).toBe(13);
+  });
+
+  it('stores streamed heatmaps under every room key and renders them on a canvas', () => {
+    const grid = [
+      [0.0, 0.5],
+      [0.9, 0.2],
+    ];
+    useRealtimeStore.getState().updateHeatmap(['uuid-1', 'room1', ''], grid);
+    const heatmaps = useRealtimeStore.getState().liveHeatmaps;
+    expect(heatmaps['uuid-1']).toBe(grid);
+    expect(heatmaps.room1).toBe(grid);
+    expect(heatmaps['']).toBeUndefined();
+
+    const { container } = render(
+      <InteractiveFloorPlan zones={[]} zoneMetrics={[]} heatmapGrid={grid} />,
+    );
+    const canvas = container.querySelector('canvas');
+    expect(canvas).not.toBeNull();
+    expect(canvas?.getAttribute('width')).toBe('2');
+    expect(canvas?.getAttribute('height')).toBe('2');
   });
 });

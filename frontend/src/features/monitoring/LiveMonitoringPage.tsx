@@ -21,13 +21,13 @@ import {
   useCurrentOccupancyQuery,
   useRoomDetailQuery,
 } from '../../hooks/useDomainQueries';
-import { useRealtimeStore } from '../../stores/realtimeStore';
+import { useLiveRoomMetrics } from '../../stores/realtimeStore';
 import { useUIStore } from '../../stores/uiStore';
 import { formatDensity, formatPercentage } from '../../utils/formatters';
 
 export const LiveMonitoringPage: React.FC = () => {
   const selectedRoomId = useUIStore((s) => s.selectedRoomId);
-  const liveRoom = useRealtimeStore((s) => s.liveRooms[selectedRoomId]);
+  const liveRoom = useLiveRoomMetrics(selectedRoomId);
 
   const roomQuery = useRoomDetailQuery(selectedRoomId);
   const occQuery = useCurrentOccupancyQuery(selectedRoomId);

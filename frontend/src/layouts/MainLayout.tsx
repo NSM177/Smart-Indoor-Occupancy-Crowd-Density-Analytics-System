@@ -35,6 +35,7 @@ import { useRealtimeWebSocket } from '../hooks/useRealtimeWebSocket';
 import { authService } from '../services/authService';
 import { useAuthStore } from '../stores/authStore';
 import { useRealtimeStore } from '../stores/realtimeStore';
+import { useShallow } from 'zustand/react/shallow';
 import { useUIStore } from '../stores/uiStore';
 import { formatDateTime } from '../utils/formatters';
 
@@ -107,9 +108,29 @@ export const MainLayout: React.FC = () => {
     setNotificationDrawerOpen,
     selectedRoomId,
     setSelectedRoomId,
-  } = useUIStore();
+  } = useUIStore(
+    useShallow((s) => ({
+      theme: s.theme,
+      toggleTheme: s.toggleTheme,
+      sidebarCollapsed: s.sidebarCollapsed,
+      setSidebarCollapsed: s.setSidebarCollapsed,
+      mobileSidebarOpen: s.mobileSidebarOpen,
+      setMobileSidebarOpen: s.setMobileSidebarOpen,
+      notificationDrawerOpen: s.notificationDrawerOpen,
+      setNotificationDrawerOpen: s.setNotificationDrawerOpen,
+      selectedRoomId: s.selectedRoomId,
+      setSelectedRoomId: s.setSelectedRoomId,
+    })),
+  );
 
-  const { user, isAuthenticated, refreshToken, clearSession } = useAuthStore();
+  const { user, isAuthenticated, refreshToken, clearSession } = useAuthStore(
+    useShallow((s) => ({
+      user: s.user,
+      isAuthenticated: s.isAuthenticated,
+      refreshToken: s.refreshToken,
+      clearSession: s.clearSession,
+    })),
+  );
   const markAlertsRead = useRealtimeStore((s) => s.markAlertsRead);
 
   const {

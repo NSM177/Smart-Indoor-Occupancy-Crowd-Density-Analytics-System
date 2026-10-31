@@ -678,6 +678,7 @@ class DeviceService:
             device.auto_mode = cmd.auto_mode
 
         saved = self.repo.update(device)
+        mqtt_worker.invalidate_actuation_cache(saved.room_id)
         command_payload = {
             "ledState": saved.led_state,
             "buzzerActive": saved.buzzer_active,

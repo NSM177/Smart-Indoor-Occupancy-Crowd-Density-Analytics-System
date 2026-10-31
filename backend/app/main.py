@@ -73,10 +73,12 @@ def create_app(
 
         if enable_mqtt_broker:
             await mqtt_worker.start()
+        ws_manager.start_liveness_monitor()
         logger.info("%s started on port %d", settings.APP_NAME, settings.BACKEND_PORT)
         try:
             yield
         finally:
+            await ws_manager.stop_liveness_monitor()
             if enable_mqtt_broker:
                 await mqtt_worker.stop()
             logger.info("%s shut down cleanly.", settings.APP_NAME)
@@ -134,6 +136,26 @@ def create_app(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+    async def _send_latest_heatmaps(cid: str) -> None:
+        """Give a client that just opted into heatmaps the current grid right away."""
+        conn = ws_manager.get_client(cid)
+        if conn is None:
+            return
+        sent = set()
+        for room_key in conn.subscribed_rooms:
+            heatmap = mqtt_worker.get_live_heatmap(room_key)
+            if heatmap and heatmap["room_id"] not in sent:
+                sent.add(heatmap["room_id"])
+                await ws_manager.send_to_client(
+                    cid,
+                    {
+                        "event": "heatmap.updated",
+                        "room_id": heatmap["room_id"],
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "data": heatmap,
+                    },
+                )
+
     @app.websocket("/ws/realtime")
     @app.websocket("/api/v1/ws")
     async def websocket_realtime_endpoint(
@@ -160,7 +182,9 @@ def create_app(
             while True:
                 msg = await websocket.receive_json()
                 if isinstance(msg, dict):
-                    await ws_manager.handle_client_message(cid, msg)
+                    ack = await ws_manager.handle_client_message(cid, msg)
+                    if ack and ack.get("event") == "heatmap_subscription" and ack["enabled"]:
+                        await _send_latest_heatmaps(cid)
         except WebSocketDisconnect:
             await ws_manager.disconnect(cid)
         except Exception as exc:

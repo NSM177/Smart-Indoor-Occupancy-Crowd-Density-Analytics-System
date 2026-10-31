@@ -50,6 +50,10 @@ from app.websocket.manager import ws_manager
 
 logger = logging.getLogger("backend.mqtt")
 
+# (event name, data, room_id) collected by sync processors and broadcast on the loop
+BroadcastEvent = Tuple[str, Dict[str, Any], str]
+HEATMAP_EVENT = "heatmap.updated"
+
 
 def classify_severity(
     count: int,
@@ -82,6 +86,10 @@ class MqttAsyncWorker:
     # Granular `occupancy/{room}/count|density` messages are ignored while full AI
     # telemetry for the same room arrived within this window (telemetry is the superset).
     TELEMETRY_SUPERSEDE_SEC: float = 5.0
+    # The AI heatmap grid (~10 KB JSON) is sent on its own event at this rate
+    HEATMAP_BROADCAST_INTERVAL_SEC: float = 2.0
+    # Device auto-actuation state is re-verified against the DB at least this often
+    ACTUATION_RECHECK_SEC: float = 30.0
 
     def __init__(
         self,
@@ -106,6 +114,10 @@ class MqttAsyncWorker:
         self._last_density_persisted_at: Dict[str, float] = {}
         self._last_telemetry_at: Dict[str, float] = {}
         self._room_code_by_id: Dict[str, str] = {}
+        self._live_heatmap: Dict[str, Dict[str, Any]] = {}
+        self._last_heatmap_broadcast_at: Dict[str, float] = {}
+        # room_id -> (led_state, buzzer_active, checked_at monotonic)
+        self._last_actuation: Dict[str, Tuple[str, bool, float]] = {}
         self._reconnect_attempts: int = 0
 
     @property
@@ -118,6 +130,16 @@ class MqttAsyncWorker:
 
     def get_live_room_state(self, room_key: str) -> Optional[Dict[str, Any]]:
         return self._live_room_state.get(room_key)
+
+    def get_live_heatmap(self, room_key: str) -> Optional[Dict[str, Any]]:
+        return self._live_heatmap.get(room_key)
+
+    def invalidate_actuation_cache(self, room_id: Optional[str] = None) -> None:
+        """Force the next auto-actuation check to re-read devices from the DB."""
+        if room_id is None:
+            self._last_actuation.clear()
+        else:
+            self._last_actuation.pop(room_id, None)
 
     async def start(self) -> None:
         """Start the async queue consumer and connect the Paho-MQTT client."""
@@ -388,6 +410,25 @@ class MqttAsyncWorker:
             and 0.0 <= (now_mono - last_ts) < self.TELEMETRY_SUPERSEDE_SEC
         )
 
+    async def _run_processor(
+        self, processor: Callable[..., Dict[str, Any]], **kwargs: Any
+    ) -> Dict[str, Any]:
+        """
+        Run a blocking (sync SQLAlchemy) processor in a worker thread so the event
+        loop keeps serving WebSockets, then broadcast its events from the loop.
+        Messages are still handled one at a time by the single queue consumer.
+        """
+        events: List[BroadcastEvent] = []
+        result = await asyncio.to_thread(processor, events, **kwargs)
+        for event, data, room_id in events:
+            await ws_manager.broadcast_event(
+                event,
+                data,
+                room_id=room_id,
+                heatmap_only=(event == HEATMAP_EVENT),
+            )
+        return result
+
     async def process_raw_message(
         self,
         topic: str,
@@ -415,7 +456,9 @@ class MqttAsyncWorker:
             if not isinstance(raw_data, dict):
                 raise ValueError("JSON root must be an object.")
         except Exception as exc:
-            self._record_invalid_payload(topic, payload_str, str(exc))
+            await asyncio.to_thread(
+                self._record_invalid_payload, topic, payload_str, str(exc)
+            )
             return {"status": "invalid_json", "topic": topic, "error": str(exc)}
 
         # 3. Route by topic pattern & validate with Pydantic v2
@@ -428,7 +471,8 @@ class MqttAsyncWorker:
                 and parts[3] == "telemetry"
             ):
                 validated = MqttAiTelemetryPayload.model_validate(raw_data)
-                return await self._handle_ai_telemetry(
+                return await self._run_processor(
+                    self._process_ai_telemetry,
                     room_identifier=parts[2],
                     payload=validated,
                     retain=retain,
@@ -441,7 +485,8 @@ class MqttAsyncWorker:
                 and parts[2] == "count"
             ):
                 validated_cnt = MqttCountPayload.model_validate(raw_data)
-                return await self._handle_occupancy_count(
+                return await self._run_processor(
+                    self._process_occupancy_count,
                     room_identifier=parts[1],
                     payload=validated_cnt,
                     retain=retain,
@@ -454,7 +499,8 @@ class MqttAsyncWorker:
                 and parts[2] == "density"
             ):
                 validated_den = MqttDensityPayload.model_validate(raw_data)
-                return await self._handle_occupancy_density(
+                return await self._run_processor(
+                    self._process_occupancy_density,
                     room_identifier=parts[1],
                     payload=validated_den,
                     retain=retain,
@@ -467,7 +513,8 @@ class MqttAsyncWorker:
                 and parts[2] == "alerts"
             ):
                 validated_al = MqttAlertPayload.model_validate(raw_data)
-                return await self._handle_alert_message(
+                return await self._run_processor(
+                    self._process_alert_message,
                     room_identifier=parts[1],
                     payload=validated_al,
                     retain=retain,
@@ -485,7 +532,8 @@ class MqttAsyncWorker:
                 and parts[3] == "status"
             ):
                 validated_dev = MqttDeviceStatusPayload.model_validate(raw_data)
-                return await self._handle_device_status(
+                return await self._run_processor(
+                    self._process_device_status,
                     payload=validated_dev,
                     raw_data=raw_data,
                     retain=retain,
@@ -494,7 +542,9 @@ class MqttAsyncWorker:
             return {"status": "ignored_topic", "topic": topic}
 
         except ValidationError as exc:
-            self._record_invalid_payload(topic, payload_str, str(exc))
+            await asyncio.to_thread(
+                self._record_invalid_payload, topic, payload_str, str(exc)
+            )
             return {
                 "status": "validation_error",
                 "topic": topic,
@@ -561,8 +611,9 @@ class MqttAsyncWorker:
             self._room_code_by_id[room.id] = room.code
         return room
 
-    async def _handle_ai_telemetry(
+    def _process_ai_telemetry(
         self,
+        events: List[BroadcastEvent],
         room_identifier: str,
         payload: MqttAiTelemetryPayload,
         retain: bool,
@@ -608,7 +659,6 @@ class MqttAsyncWorker:
                 "room_status": room_status,
                 "inference_fps": payload.fps,
                 "zones": [z.model_dump() for z in payload.zones],
-                "heatmap_grid": payload.heatmapGrid,
                 "retained": retain,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -617,6 +667,27 @@ class MqttAsyncWorker:
             if not retain:
                 self._last_telemetry_at[room.id] = now_mono
                 self._last_telemetry_at[room.code] = now_mono
+
+            # The heatmap grid is kept out of `occupancy.updated` and sent on its
+            # own throttled event to clients that opted in (Density page).
+            if payload.heatmapGrid:
+                heatmap_data = {
+                    "room_id": room.id,
+                    "room_code": room.code,
+                    "heatmap_grid": [
+                        [round(v, 3) for v in row] for row in payload.heatmapGrid
+                    ],
+                    "updated_at": state_snapshot["updated_at"],
+                }
+                self._live_heatmap[room.id] = heatmap_data
+                self._live_heatmap[room.code] = heatmap_data
+                last_hm = self._last_heatmap_broadcast_at.get(room.id)
+                if (
+                    last_hm is None
+                    or (now_mono - last_hm) >= self.HEATMAP_BROADCAST_INTERVAL_SEC
+                ):
+                    self._last_heatmap_broadcast_at[room.id] = now_mono
+                    events.append((HEATMAP_EVENT, heatmap_data, room.id))
 
             persisted = False
             created_alerts: List[Dict[str, Any]] = []
@@ -696,35 +767,35 @@ class MqttAsyncWorker:
                 self._actuate_iot_for_room(db, room, room_status)
 
             # Broadcast WebSocket realtime events
-            await ws_manager.broadcast_event(
-                "occupancy.updated", state_snapshot, room_id=room.id
-            )
-            await ws_manager.broadcast_event(
-                "density.updated",
-                {
-                    "room_id": room.id,
-                    "room_code": room.code,
-                    "overall_density": overall_density,
-                    "capacity_ratio": cap_ratio,
-                    "room_status": room_status,
-                    "zones": state_snapshot["zones"],
-                },
-                room_id=room.id,
-            )
-            if state_snapshot["zones"]:
-                await ws_manager.broadcast_event(
-                    "zone.updated",
+            events.append(("occupancy.updated", state_snapshot, room.id))
+            events.append(
+                (
+                    "density.updated",
                     {
                         "room_id": room.id,
                         "room_code": room.code,
+                        "overall_density": overall_density,
+                        "capacity_ratio": cap_ratio,
+                        "room_status": room_status,
                         "zones": state_snapshot["zones"],
                     },
-                    room_id=room.id,
+                    room.id,
+                )
+            )
+            if state_snapshot["zones"]:
+                events.append(
+                    (
+                        "zone.updated",
+                        {
+                            "room_id": room.id,
+                            "room_code": room.code,
+                            "zones": state_snapshot["zones"],
+                        },
+                        room.id,
+                    )
                 )
             for al in created_alerts:
-                await ws_manager.broadcast_event(
-                    "alert.created", al, room_id=room.id
-                )
+                events.append(("alert.created", al, room.id))
 
             return {
                 "status": "processed",
@@ -735,8 +806,9 @@ class MqttAsyncWorker:
         finally:
             db.close()
 
-    async def _handle_occupancy_count(
+    def _process_occupancy_count(
         self,
+        events: List[BroadcastEvent],
         room_identifier: str,
         payload: MqttCountPayload,
         retain: bool,
@@ -820,15 +892,11 @@ class MqttAsyncWorker:
                         message=f"Occupancy count {payload.current_count} reached {room_status} in {room.name}.",
                     )
                     if al:
-                        await ws_manager.broadcast_event(
-                            "alert.created", al, room_id=room.id
-                        )
+                        events.append(("alert.created", al, room.id))
 
                 self._actuate_iot_for_room(db, room, room_status)
 
-            await ws_manager.broadcast_event(
-                "occupancy.updated", snapshot, room_id=room.id
-            )
+            events.append(("occupancy.updated", snapshot, room.id))
             return {
                 "status": "processed",
                 "retained": retain,
@@ -838,8 +906,9 @@ class MqttAsyncWorker:
         finally:
             db.close()
 
-    async def _handle_occupancy_density(
+    def _process_occupancy_density(
         self,
+        events: List[BroadcastEvent],
         room_identifier: str,
         payload: MqttDensityPayload,
         retain: bool,
@@ -908,18 +977,18 @@ class MqttAsyncWorker:
                 "zones": [z.model_dump() for z in payload.zones],
                 "retained": retain,
             }
-            await ws_manager.broadcast_event(
-                "density.updated", data_out, room_id=room.id
-            )
+            events.append(("density.updated", data_out, room.id))
             if payload.zones:
-                await ws_manager.broadcast_event(
-                    "zone.updated",
-                    {
-                        "room_id": room.id,
-                        "room_code": room.code,
-                        "zones": data_out["zones"],
-                    },
-                    room_id=room.id,
+                events.append(
+                    (
+                        "zone.updated",
+                        {
+                            "room_id": room.id,
+                            "room_code": room.code,
+                            "zones": data_out["zones"],
+                        },
+                        room.id,
+                    )
                 )
             return {
                 "status": "processed",
@@ -929,8 +998,9 @@ class MqttAsyncWorker:
         finally:
             db.close()
 
-    async def _handle_alert_message(
+    def _process_alert_message(
         self,
+        events: List[BroadcastEvent],
         room_identifier: str,
         payload: MqttAlertPayload,
         retain: bool,
@@ -973,15 +1043,14 @@ class MqttAsyncWorker:
                 zone_id=zone_id,
             )
             if alert_dict:
-                await ws_manager.broadcast_event(
-                    "alert.created", alert_dict, room_id=room.id
-                )
+                events.append(("alert.created", alert_dict, room.id))
             return {"status": "processed", "alert": alert_dict}
         finally:
             db.close()
 
-    async def _handle_device_status(
+    def _process_device_status(
         self,
+        events: List[BroadcastEvent],
         payload: MqttDeviceStatusPayload,
         raw_data: Dict[str, Any],
         retain: bool,
@@ -1036,6 +1105,8 @@ class MqttAsyncWorker:
 
             db.commit()
             db.refresh(device)
+            # Reported LED/buzzer may differ from the last auto-actuation target
+            self.invalidate_actuation_cache(device.room_id)
 
             room_code = self._room_code_by_id.get(device.room_id)
             if room_code is None and device.room is not None:
@@ -1052,9 +1123,7 @@ class MqttAsyncWorker:
                 "auto_mode": device.auto_mode,
                 "last_heartbeat": device.last_heartbeat.isoformat(),
             }
-            await ws_manager.broadcast_event(
-                "device.status_changed", event_data, room_id=device.room_id
-            )
+            events.append(("device.status_changed", event_data, device.room_id))
             return {"status": "processed", "device_code": device.device_code}
         finally:
             db.close()
@@ -1071,25 +1140,24 @@ class MqttAsyncWorker:
         message: str,
         zone_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Create an Alert if there is no unresolved alert of the same type/severity in the last 30s."""
-        existing = (
-            db.query(Alert)
+        """
+        Create an Alert unless one of the same room/type/severity is still unresolved.
+        A sustained crowding episode therefore yields one alert (until an operator
+        resolves it or the severity escalates) instead of a new row every 30s.
+        """
+        existing_id = (
+            db.query(Alert.id)
             .filter(
                 Alert.room_id == room.id,
                 Alert.alert_type == alert_type,
                 Alert.severity == severity,
                 Alert.is_resolved.is_(False),
             )
-            .order_by(Alert.triggered_at.desc())
             .first()
         )
+        if existing_id is not None:
+            return None
         now = datetime.now(timezone.utc)
-        if existing and existing.triggered_at:
-            trig = existing.triggered_at
-            if trig.tzinfo is None:
-                trig = trig.replace(tzinfo=timezone.utc)
-            if (now - trig).total_seconds() < 30.0:
-                return None
 
         alert = Alert(
             room_id=room.id,
@@ -1127,12 +1195,11 @@ class MqttAsyncWorker:
     def _actuate_iot_for_room(
         self, db: Session, room: Room, room_status: str
     ) -> None:
-        """Map `NORMAL`/`WARNING`/`CRITICAL` to Green/Yellow/Red LED & Buzzer when `auto_mode=True`."""
-        devices = (
-            db.query(Device)
-            .filter(Device.room_id == room.id, Device.auto_mode.is_(True))
-            .all()
-        )
+        """
+        Map `NORMAL`/`WARNING`/`CRITICAL` to Green/Yellow/Red LED & Buzzer when `auto_mode=True`.
+        Devices are only re-read when the target changes, a device reported its
+        status, a manual command was sent, or `ACTUATION_RECHECK_SEC` elapsed.
+        """
         if room_status == "CRITICAL":
             target_led, target_buzzer = "RED", True
         elif room_status == "WARNING":
@@ -1140,20 +1207,42 @@ class MqttAsyncWorker:
         else:
             target_led, target_buzzer = "GREEN", False
 
-        for dev in devices:
-            if dev.led_state != target_led or dev.buzzer_active != target_buzzer:
-                dev.led_state = target_led
-                dev.buzzer_active = target_buzzer
-                db.commit()
-                self.publish_device_command(
-                    room_code=room.code,
-                    device_code=dev.device_code,
-                    command={
-                        "ledState": target_led,
-                        "buzzerActive": target_buzzer,
-                        "autoMode": True,
-                    },
-                )
+        now_mono = time.monotonic()
+        cached = self._last_actuation.get(room.id)
+        if (
+            cached is not None
+            and cached[0] == target_led
+            and cached[1] == target_buzzer
+            and (now_mono - cached[2]) < self.ACTUATION_RECHECK_SEC
+        ):
+            return
+
+        devices = (
+            db.query(Device)
+            .filter(Device.room_id == room.id, Device.auto_mode.is_(True))
+            .all()
+        )
+        changed = [
+            dev
+            for dev in devices
+            if dev.led_state != target_led or dev.buzzer_active != target_buzzer
+        ]
+        for dev in changed:
+            dev.led_state = target_led
+            dev.buzzer_active = target_buzzer
+        if changed:
+            db.commit()
+        for dev in changed:
+            self.publish_device_command(
+                room_code=room.code,
+                device_code=dev.device_code,
+                command={
+                    "ledState": target_led,
+                    "buzzerActive": target_buzzer,
+                    "autoMode": True,
+                },
+            )
+        self._last_actuation[room.id] = (target_led, target_buzzer, now_mono)
 
 
 mqtt_worker = MqttAsyncWorker()

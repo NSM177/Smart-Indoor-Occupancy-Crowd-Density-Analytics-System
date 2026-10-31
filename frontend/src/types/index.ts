@@ -372,6 +372,8 @@ export type WsEventType =
   | 'occupancy.updated'
   | 'density.updated'
   | 'zone.updated'
+  | 'heatmap.updated'
+  | 'heatmap_subscription'
   | 'alert.created'
   | 'device.status_changed';
 

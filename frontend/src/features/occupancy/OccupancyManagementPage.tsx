@@ -19,7 +19,7 @@ import {
   useCurrentOccupancyQuery,
   useOccupancyHistoryQuery,
 } from '../../hooks/useDomainQueries';
-import { useRealtimeStore } from '../../stores/realtimeStore';
+import { useLiveRoomMetrics } from '../../stores/realtimeStore';
 import { useUIStore } from '../../stores/uiStore';
 import {
   exportToCsv,
@@ -30,7 +30,7 @@ import {
 
 export const OccupancyManagementPage: React.FC = () => {
   const selectedRoomId = useUIStore((s) => s.selectedRoomId);
-  const liveRoom = useRealtimeStore((s) => s.liveRooms[selectedRoomId]);
+  const liveRoom = useLiveRoomMetrics(selectedRoomId);
   const [sampleLimit, setSampleLimit] = useState<number>(100);
 
   const occQuery = useCurrentOccupancyQuery(selectedRoomId);
