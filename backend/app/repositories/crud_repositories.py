@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.entities import (
@@ -165,21 +165,30 @@ class DensityRepository:
         self.db = db
 
     def get_latest_per_zone(self, room_id: str) -> Dict[str, DensityRecord]:
-        zones = self.db.query(Zone).filter(Zone.room_id == room_id).all()
-        latest_map: Dict[str, DensityRecord] = {}
-        for z in zones:
-            rec = (
-                self.db.query(DensityRecord)
-                .filter(
-                    DensityRecord.room_id == room_id,
-                    DensityRecord.zone_id == z.id,
+        """Latest record per zone in one query (window function, PostgreSQL & SQLite)."""
+        ranked = (
+            select(
+                DensityRecord.id.label("id"),
+                func.row_number()
+                .over(
+                    partition_by=DensityRecord.zone_id,
+                    order_by=(
+                        desc(DensityRecord.recorded_at),
+                        desc(DensityRecord.id),
+                    ),
                 )
-                .order_by(desc(DensityRecord.recorded_at), desc(DensityRecord.id))
-                .first()
+                .label("rn"),
             )
-            if rec:
-                latest_map[z.id] = rec
-        return latest_map
+            .where(DensityRecord.room_id == room_id)
+            .subquery()
+        )
+        records = (
+            self.db.query(DensityRecord)
+            .join(ranked, DensityRecord.id == ranked.c.id)
+            .filter(ranked.c.rn == 1)
+            .all()
+        )
+        return {rec.zone_id: rec for rec in records}
 
     def list_history(
         self,

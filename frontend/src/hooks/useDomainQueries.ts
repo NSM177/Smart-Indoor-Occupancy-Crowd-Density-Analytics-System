@@ -15,6 +15,19 @@ import {
   ZoneCreatePayload,
   ZoneUpdatePayload,
 } from '../types';
+import { useRealtimeStore } from '../stores/realtimeStore';
+
+// Poll slowly while the WebSocket is delivering fresh data, fall back to the
+// faster interval when it is disconnected or stale.
+function realtimeAwareInterval(healthyMs: number, fallbackMs: number) {
+  return () => {
+    const { connectionStatus, isStale, lastMessageAt } =
+      useRealtimeStore.getState();
+    return connectionStatus === 'CONNECTED' && !isStale && lastMessageAt !== null
+      ? healthyMs
+      : fallbackMs;
+  };
+}
 
 // ============================================================================
 // Rooms & Polygon Zones Hooks
@@ -137,7 +150,7 @@ export function useCurrentOccupancyQuery(roomId: string) {
     queryKey: ['occupancy-current', roomId],
     queryFn: () => occupancyService.getCurrentOccupancy(roomId),
     enabled: Boolean(roomId),
-    refetchInterval: 8_000,
+    refetchInterval: realtimeAwareInterval(30_000, 8_000),
   });
 }
 
@@ -158,7 +171,7 @@ export function useCurrentDensityQuery(roomId: string) {
     queryKey: ['density-current', roomId],
     queryFn: () => densityService.getCurrentDensity(roomId),
     enabled: Boolean(roomId),
-    refetchInterval: 8_000,
+    refetchInterval: realtimeAwareInterval(30_000, 8_000),
   });
 }
 
@@ -179,7 +192,7 @@ export function useAiEngineRealtimeQuery(enabled = true) {
     queryKey: ['ai-engine-current'],
     queryFn: () => densityService.getAiEngineCurrent(),
     enabled,
-    refetchInterval: 3_000,
+    refetchInterval: realtimeAwareInterval(15_000, 3_000),
   });
 }
 
@@ -191,7 +204,7 @@ export function useAnalyticsOverviewQuery(roomId: string, hours = 24) {
     queryKey: ['analytics-overview', roomId, hours],
     queryFn: () => analyticsService.getOverview(roomId, hours),
     enabled: Boolean(roomId),
-    refetchInterval: 20_000,
+    refetchInterval: 60_000,
   });
 }
 
@@ -248,7 +261,7 @@ export function useAlertsQuery(params?: AlertFilterParams) {
   return useQuery({
     queryKey: ['alerts', params],
     queryFn: () => alertService.getAlerts(params),
-    refetchInterval: 10_000,
+    refetchInterval: realtimeAwareInterval(30_000, 10_000),
   });
 }
 
@@ -278,7 +291,7 @@ export function useDevicesQuery(roomId?: string) {
   return useQuery({
     queryKey: ['devices', roomId],
     queryFn: () => deviceService.getDevices(roomId),
-    refetchInterval: 10_000,
+    refetchInterval: realtimeAwareInterval(30_000, 10_000),
   });
 }
 

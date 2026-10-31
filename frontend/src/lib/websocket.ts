@@ -10,8 +10,12 @@ import { queryClient } from './queryClient';
 import { useRealtimeStore } from '../stores/realtimeStore';
 import { AlertEntity, WsEnvelope } from '../types';
 
+const DENSITY_REFRESH_THROTTLE_MS = 5_000;
+const EVENT_REFRESH_THROTTLE_MS = 1_000;
+
 class RealtimeWebSocketSingleton {
   private socket: WebSocket | null = null;
+  private invalidateTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
@@ -109,15 +113,17 @@ class RealtimeWebSocketSingleton {
       return;
     }
 
+    // Live counts are rendered from the Zustand store, so occupancy pushes no
+    // longer trigger a REST refetch. Per-zone REST snapshots, alerts and devices
+    // are refreshed at most once per throttle window instead of on every frame.
     if (envelope.event === 'occupancy.updated' && envelope.data) {
       store.updateRoomOccupancy(roomKey, envelope.data);
-      queryClient.invalidateQueries({ queryKey: ['occupancy-current'] });
       return;
     }
 
     if (envelope.event === 'density.updated' && envelope.data) {
       store.updateRoomOccupancy(roomKey, envelope.data);
-      queryClient.invalidateQueries({ queryKey: ['density-current'] });
+      this.scheduleInvalidate('density-current', DENSITY_REFRESH_THROTTLE_MS);
       return;
     }
 
@@ -128,20 +134,36 @@ class RealtimeWebSocketSingleton {
           zones: zones as never,
         });
       }
-      queryClient.invalidateQueries({ queryKey: ['density-current'] });
+      this.scheduleInvalidate('density-current', DENSITY_REFRESH_THROTTLE_MS);
       return;
     }
 
     if (envelope.event === 'alert.created' && envelope.data) {
       const alertObj = envelope.data as unknown as AlertEntity;
       store.pushLiveAlert(alertObj);
-      queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      this.scheduleInvalidate('alerts', EVENT_REFRESH_THROTTLE_MS);
       return;
     }
 
     if (envelope.event === 'device.status_changed') {
-      queryClient.invalidateQueries({ queryKey: ['devices'] });
+      this.scheduleInvalidate('devices', EVENT_REFRESH_THROTTLE_MS);
     }
+  }
+
+  private scheduleInvalidate(rootKey: string, delayMs: number): void {
+    if (this.invalidateTimers.has(rootKey)) return;
+    this.invalidateTimers.set(
+      rootKey,
+      setTimeout(() => {
+        this.invalidateTimers.delete(rootKey);
+        queryClient.invalidateQueries({ queryKey: [rootKey] });
+      }, delayMs),
+    );
+  }
+
+  private clearInvalidateTimers(): void {
+    this.invalidateTimers.forEach((timer) => clearTimeout(timer));
+    this.invalidateTimers.clear();
   }
 
   private subscribeRoom(roomId: string): void {
@@ -200,6 +222,7 @@ class RealtimeWebSocketSingleton {
       clearInterval(this.staleCheckTimer);
       this.staleCheckTimer = null;
     }
+    this.clearInvalidateTimers();
     if (this.socket) {
       try {
         this.socket.close();

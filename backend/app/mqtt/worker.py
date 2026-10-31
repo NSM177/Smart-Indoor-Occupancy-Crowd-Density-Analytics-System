@@ -79,6 +79,10 @@ class MqttAsyncWorker:
         ("iot/devices/+/status", 1),
     ]
 
+    # Granular `occupancy/{room}/count|density` messages are ignored while full AI
+    # telemetry for the same room arrived within this window (telemetry is the superset).
+    TELEMETRY_SUPERSEDE_SEC: float = 5.0
+
     def __init__(
         self,
         session_factory: Callable[[], Session] = SessionLocal,
@@ -99,6 +103,9 @@ class MqttAsyncWorker:
         self._live_room_state: Dict[str, Dict[str, Any]] = {}
         self._dedup_hashes: Dict[str, float] = {}
         self._last_persisted_at: Dict[str, float] = {}
+        self._last_density_persisted_at: Dict[str, float] = {}
+        self._last_telemetry_at: Dict[str, float] = {}
+        self._room_code_by_id: Dict[str, str] = {}
         self._reconnect_attempts: int = 0
 
     @property
@@ -347,7 +354,7 @@ class MqttAsyncWorker:
         if self._dedup_window_sec <= 0:
             return False
         digest = hashlib.sha256(
-            f"{topic}|{payload_str}".encode("utf-8")
+            f"{self._dedup_topic_key(topic)}|{payload_str}".encode("utf-8")
         ).hexdigest()
         prev_ts = self._dedup_hashes.get(digest)
         self._dedup_hashes[digest] = now_mono
@@ -362,6 +369,24 @@ class MqttAsyncWorker:
         if prev_ts is not None and (now_mono - prev_ts) < self._dedup_window_sec:
             return True
         return False
+
+    @staticmethod
+    def _dedup_topic_key(topic: str) -> str:
+        """IoT publishes the same status payload on two topics; dedupe them as one."""
+        parts = topic.split("/")
+        if len(parts) == 4 and parts[3] == "status" and (
+            (parts[0] == "iot" and parts[1] == "devices")
+            or (parts[0] == "occupancy" and parts[2] == "device")
+        ):
+            return "device-status"
+        return topic
+
+    def _is_superseded_by_telemetry(self, room_key: str, now_mono: float) -> bool:
+        last_ts = self._last_telemetry_at.get(room_key)
+        return (
+            last_ts is not None
+            and 0.0 <= (now_mono - last_ts) < self.TELEMETRY_SUPERSEDE_SEC
+        )
 
     async def process_raw_message(
         self,
@@ -527,11 +552,14 @@ class MqttAsyncWorker:
             db.close()
 
     def _resolve_room(self, db: Session, identifier: str) -> Optional[Room]:
-        return (
+        room = (
             db.query(Room)
             .filter((Room.id == identifier) | (Room.code == identifier))
             .first()
         )
+        if room is not None:
+            self._room_code_by_id[room.id] = room.code
+        return room
 
     async def _handle_ai_telemetry(
         self,
@@ -586,6 +614,9 @@ class MqttAsyncWorker:
             }
             self._live_room_state[room.id] = state_snapshot
             self._live_room_state[room.code] = state_snapshot
+            if not retain:
+                self._last_telemetry_at[room.id] = now_mono
+                self._last_telemetry_at[room.code] = now_mono
 
             persisted = False
             created_alerts: List[Dict[str, Any]] = []
@@ -683,7 +714,11 @@ class MqttAsyncWorker:
             if state_snapshot["zones"]:
                 await ws_manager.broadcast_event(
                     "zone.updated",
-                    {"room_id": room.id, "zones": state_snapshot["zones"]},
+                    {
+                        "room_id": room.id,
+                        "room_code": room.code,
+                        "zones": state_snapshot["zones"],
+                    },
                     room_id=room.id,
                 )
             for al in created_alerts:
@@ -707,6 +742,9 @@ class MqttAsyncWorker:
         retain: bool,
         now_mono: float,
     ) -> Dict[str, Any]:
+        if not retain and self._is_superseded_by_telemetry(room_identifier, now_mono):
+            return {"status": "skipped_superseded_by_telemetry", "room": room_identifier}
+
         db = self._session_factory()
         try:
             room = self._resolve_room(db, room_identifier) or self._resolve_room(
@@ -807,6 +845,9 @@ class MqttAsyncWorker:
         retain: bool,
         now_mono: float,
     ) -> Dict[str, Any]:
+        if not retain and self._is_superseded_by_telemetry(room_identifier, now_mono):
+            return {"status": "skipped_superseded_by_telemetry", "room": room_identifier}
+
         db = self._session_factory()
         try:
             room = self._resolve_room(db, room_identifier) or self._resolve_room(
@@ -816,7 +857,13 @@ class MqttAsyncWorker:
                 return {"status": "room_not_found", "room": room_identifier}
 
             persisted = False
-            if not retain and payload.zones:
+            last_ts = self._last_density_persisted_at.get(room.id, 0.0)
+            due = (
+                last_ts == 0.0
+                or (now_mono - last_ts) >= settings.OCCUPANCY_LOG_INTERVAL_SEC
+            )
+            if not retain and payload.zones and due:
+                self._last_density_persisted_at[room.id] = now_mono
                 zones_by_code = {
                     z.code: z
                     for z in db.query(Zone).filter(Zone.room_id == room.id).all()
@@ -867,7 +914,11 @@ class MqttAsyncWorker:
             if payload.zones:
                 await ws_manager.broadcast_event(
                     "zone.updated",
-                    {"room_id": room.id, "zones": data_out["zones"]},
+                    {
+                        "room_id": room.id,
+                        "room_code": room.code,
+                        "zones": data_out["zones"],
+                    },
                     room_id=room.id,
                 )
             return {
@@ -986,10 +1037,15 @@ class MqttAsyncWorker:
             db.commit()
             db.refresh(device)
 
+            room_code = self._room_code_by_id.get(device.room_id)
+            if room_code is None and device.room is not None:
+                room_code = device.room.code
+                self._room_code_by_id[device.room_id] = room_code
             event_data = {
                 "id": device.id,
                 "device_code": device.device_code,
                 "room_id": device.room_id,
+                "room_code": room_code,
                 "status": device.status,
                 "led_state": device.led_state,
                 "buzzer_active": device.buzzer_active,
@@ -1055,6 +1111,7 @@ class MqttAsyncWorker:
         return {
             "id": alert.id,
             "room_id": alert.room_id,
+            "room_code": room.code,
             "zone_id": alert.zone_id,
             "alert_type": alert.alert_type,
             "severity": alert.severity,

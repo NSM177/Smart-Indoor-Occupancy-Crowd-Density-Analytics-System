@@ -337,7 +337,8 @@ class OccupancyService:
         live = mqtt_worker.get_live_room_state(room.id) or mqtt_worker.get_live_room_state(
             room.code
         )
-        latest = self.repo.get_latest_by_room(room.id)
+        # DB fallback is only needed when no live MQTT state exists
+        latest = None if live else self.repo.get_latest_by_room(room.id)
 
         if live:
             cur_count = int(live.get("current_count", 0))
@@ -422,9 +423,8 @@ class DensityService:
         self, room_identifier: str
     ) -> RoomDensityCurrentResponse:
         room = self.room_service.get_room_entity(room_identifier)
-        zones = self.zone_repo.list_by_room(room.id)
-        latest_zone_map = self.den_repo.get_latest_per_zone(room.id)
-        latest_occ = self.occ_repo.get_latest_by_room(room.id)
+        # Zones are already eager-loaded with the room; avoid a second query
+        zones = sorted(room.zones, key=lambda z: z.code)
         live = mqtt_worker.get_live_room_state(room.id)
 
         live_zones_by_code: Dict[str, Dict[str, Any]] = {}
@@ -433,6 +433,11 @@ class DensityService:
                 code = lz.get("zoneCode") or lz.get("code")
                 if code:
                     live_zones_by_code[str(code)] = lz
+
+        # Query persisted per-zone history only for zones missing from live state
+        latest_zone_map: Dict[str, Any] = {}
+        if any(z.code not in live_zones_by_code for z in zones):
+            latest_zone_map = self.den_repo.get_latest_per_zone(room.id)
 
         zone_snapshots: List[ZoneDensitySnapshot] = []
         for z in zones:
@@ -467,6 +472,10 @@ class DensityService:
                     severity=sev,
                 )
             )
+
+        latest_occ = None
+        if not (live and "current_count" in live):
+            latest_occ = self.occ_repo.get_latest_by_room(room.id)
 
         if live and "current_count" in live:
             total_count = int(live["current_count"])

@@ -7,12 +7,12 @@ Supports both:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.security import get_optional_user
+from app.core.security import require_operator_or_admin
 from app.database.session import get_db
 from app.models.entities import User
 from app.schemas.zone import (
@@ -49,7 +49,7 @@ def list_room_zones_alias(
 def create_room_zone(
     room_id: str,
     dto: ZoneCreateRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> ZoneResponse:
     return ZoneService(db).create_zone(room_id, dto)
@@ -62,7 +62,7 @@ def create_room_zone(
 )
 def create_zone_direct(
     dto: ZoneCreateRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> ZoneResponse:
     if not dto.room_id:
@@ -77,7 +77,7 @@ def create_zone_direct(
 def update_zone_put(
     zone_id: str,
     dto: ZoneUpdateRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> ZoneResponse:
     return ZoneService(db).update_zone(zone_id, dto)
@@ -87,7 +87,7 @@ def update_zone_put(
 def update_zone_patch(
     zone_id: str,
     dto: ZoneUpdateRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> ZoneResponse:
     return ZoneService(db).update_zone(zone_id, dto)
@@ -96,7 +96,7 @@ def update_zone_patch(
 @router.delete("/zones/{zone_id}")
 def delete_zone(
     zone_id: str,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     return ZoneService(db).delete_zone(zone_id)

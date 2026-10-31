@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from app.core.security import get_optional_user, require_admin
+from app.core.security import require_admin, require_operator_or_admin
 from app.database.session import get_db
 from app.models.entities import User
 from app.schemas.room import (
@@ -50,7 +50,7 @@ def get_room(
 def update_room_put(
     room_id: str,
     dto: RoomUpdateRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> RoomResponse:
     return RoomService(db).update_room(room_id, dto)
@@ -60,7 +60,7 @@ def update_room_put(
 def update_room_patch(
     room_id: str,
     dto: RoomUpdateRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> RoomResponse:
     return RoomService(db).update_room(room_id, dto)

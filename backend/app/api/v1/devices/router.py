@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.security import get_optional_user
+from app.core.security import require_operator_or_admin
 from app.database.session import get_db
 from app.models.entities import User
 from app.schemas.device import DeviceCommandRequest, DeviceResponse
@@ -51,7 +51,7 @@ def get_device_status(
 def send_device_command(
     device_id: str,
     cmd: DeviceCommandRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     return DeviceService(db).send_command(device_id, cmd)
@@ -61,7 +61,7 @@ def send_device_command(
 def send_device_command_iot_alias(
     device_id: str,
     cmd: DeviceCommandRequest,
-    _user: Optional[User] = Depends(get_optional_user),
+    _user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     return DeviceService(db).send_command(device_id, cmd)

@@ -14,7 +14,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.security import get_optional_user
+from app.core.security import require_operator_or_admin
 from app.database.session import get_db
 from app.models.entities import User
 from app.schemas.alert import AlertResponse
@@ -54,18 +54,18 @@ def get_alert(
 @router.patch("/{alert_id}/acknowledge", response_model=AlertResponse)
 def acknowledge_alert(
     alert_id: str,
-    current_user: Optional[User] = Depends(get_optional_user),
+    current_user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> AlertResponse:
-    user_id = current_user.id if current_user else None
+    user_id = current_user.id
     return AlertService(db).acknowledge_alert(alert_id, user_id=user_id)
 
 
 @router.patch("/{alert_id}/resolve", response_model=AlertResponse)
 def resolve_alert(
     alert_id: str,
-    current_user: Optional[User] = Depends(get_optional_user),
+    current_user: User = Depends(require_operator_or_admin),
     db: Session = Depends(get_db),
 ) -> AlertResponse:
-    user_id = current_user.id if current_user else None
+    user_id = current_user.id
     return AlertService(db).resolve_alert(alert_id, user_id=user_id)

@@ -728,9 +728,21 @@ def test_09_analytics_forecasting_and_device_offline(
     assert dev_status.json()["is_online"] is False
     assert dev_status.json()["status"] == "OFFLINE"
 
+    cmd_payload = {"led_state": "GREEN", "buzzer_active": False, "auto_mode": False}
+    anon_cmd = client.post(
+        f"/api/v1/devices/{settings.IOT_DEVICE_ID}/commands", json=cmd_payload
+    )
+    assert anon_cmd.status_code == 401
+
+    op_headers = get_auth_headers(
+        client,
+        settings.DEFAULT_OPERATOR_USERNAME,
+        settings.DEFAULT_OPERATOR_PASSWORD,
+    )
     cmd_res = client.post(
         f"/api/v1/devices/{settings.IOT_DEVICE_ID}/commands",
-        json={"led_state": "GREEN", "buzzer_active": False, "auto_mode": False},
+        json=cmd_payload,
+        headers=op_headers,
     )
     assert cmd_res.status_code == 200
     assert cmd_res.json()["device"]["led_state"] == "GREEN"
@@ -842,3 +854,85 @@ def test_11_database_cascade_delete_and_transactions(
     finally:
         db.close()
 
+
+
+# ============================================================================
+# 12. MQTT Ingest Load Reduction (telemetry supersedes granular topics,
+#     density persistence throttling, cross-topic device status dedupe)
+# ============================================================================
+
+def test_12_mqtt_ingest_load_reduction(db_session_factory):
+    worker = MqttAsyncWorker(
+        session_factory=db_session_factory, dedup_window_sec=1.0
+    )
+    zones_payload = [
+        {"zoneCode": "ZONE_A", "zoneName": "Zone A", "count": 4},
+        {"zoneCode": "ZONE_B", "zoneName": "Zone B", "count": 6},
+    ]
+
+    def run(topic: str, payload: dict, ts: float) -> dict:
+        return asyncio.run(
+            worker.process_raw_message(
+                topic=topic,
+                payload_str=json.dumps(payload),
+                retain=False,
+                received_monotonic=ts,
+            )
+        )
+
+    def density_rows() -> int:
+        db = db_session_factory()
+        try:
+            return db.query(DensityRecord).count()
+        finally:
+            db.close()
+
+    # A. Without AI telemetry, density persistence is throttled per room
+    density = {"room_id": "room1", "overall_density": 0.08, "zones": zones_payload}
+    assert run("occupancy/room1/density", density, 10.0)["persisted"] is True
+    rows_after_first = density_rows()
+    assert rows_after_first > 0
+    assert run("occupancy/room1/density", {**density, "overall_density": 0.09}, 11.0)[
+        "persisted"
+    ] is False
+    assert density_rows() == rows_after_first
+    later = {**density, "overall_density": 0.10}
+    assert run("occupancy/room1/density", later, 10.0 + settings.OCCUPANCY_LOG_INTERVAL_SEC)[
+        "persisted"
+    ] is True
+
+    # B. Fresh AI telemetry supersedes granular count/density topics for the room
+    telemetry = {
+        "roomId": "room1",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "totalCount": 10,
+        "inCount": 12,
+        "outCount": 2,
+        "zones": zones_payload,
+    }
+    assert run("ai/rooms/room1/telemetry", telemetry, 100.0)["status"] == "processed"
+    count_res = run("occupancy/room1/count", {"room_id": "room1", "current_count": 10}, 101.0)
+    assert count_res["status"] == "skipped_superseded_by_telemetry"
+    den_res = run("occupancy/room1/density", {**density, "overall_density": 0.11}, 101.5)
+    assert den_res["status"] == "skipped_superseded_by_telemetry"
+    # Live state keeps the telemetry IN/OUT counts instead of being reset by `/count`
+    assert worker.get_live_room_state("room1")["in_count"] == 12
+
+    # Once telemetry is stale, granular topics are processed again
+    stale_ts = 100.0 + worker.TELEMETRY_SUPERSEDE_SEC + 1.0
+    count_res = run("occupancy/room1/count", {"room_id": "room1", "current_count": 9}, stale_ts)
+    assert count_res["status"] == "processed"
+
+    # C. Identical IoT status on both status topics is processed once
+    status = {
+        "deviceId": settings.IOT_DEVICE_ID,
+        "roomId": "room1",
+        "status": "ONLINE",
+        "ledState": "GREEN",
+        "buzzerActive": False,
+        "autoMode": True,
+    }
+    first = run(f"iot/devices/{settings.IOT_DEVICE_ID}/status", status, 300.0)
+    second = run("occupancy/room1/device/status", status, 300.01)
+    assert first["status"] == "processed"
+    assert second["status"] == "skipped_duplicate"
