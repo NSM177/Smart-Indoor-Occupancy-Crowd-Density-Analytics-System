@@ -398,7 +398,7 @@ def test_database_schema_and_initial_seed(integrated_env):
     try:
         assert db.query(User).count() == 2
         assert db.query(Room).filter(Room.code == "room1").count() == 1
-        assert db.query(Zone).count() == 3
+        assert db.query(Zone).count() == 1
         assert db.query(Device).filter(Device.device_code == "RPI_NODE_01").count() == 1
     finally:
         db.close()
@@ -486,7 +486,7 @@ def test_scenario_2_small_number_of_people(integrated_env):
         assert occ_row.room_status == "NORMAL"
 
         den_rows = db.query(DensityRecord).all()
-        assert len(den_rows) == 3
+        assert len(den_rows) == 1
     finally:
         db.close()
 
@@ -579,6 +579,29 @@ def test_scenario_4_people_moving_between_zones(integrated_env):
     worker: MqttAsyncWorker = integrated_env["worker"]
     client: TestClient = integrated_env["client"]
     headers = _get_auth_headers(client)
+
+    # Only ZONE_A is seeded; add the zones this multi-zone scenario moves people through
+    db = integrated_env["db_factory"]()
+    try:
+        room = db.query(Room).filter(Room.code == "room1").first()
+        for code, x_min, x_max in (("ZONE_B", 0.36, 0.68), ("ZONE_C", 0.69, 0.98)):
+            db.add(
+                Zone(
+                    room_id=room.id,
+                    name=code,
+                    code=code,
+                    polygon_coordinates=[
+                        {"x": x_min, "y": 0.05},
+                        {"x": x_max, "y": 0.05},
+                        {"x": x_max, "y": 0.95},
+                    ],
+                    area_sqm=40.0,
+                    max_capacity=20,
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
 
     # Frame 1: 12 people in Zone A (x=0.15), 2 in Zone B (x=0.50), 1 in Zone C (x=0.80)
     f1_tracks = [(0.15, 0.50)] * 12 + [(0.50, 0.50)] * 2 + [(0.80, 0.50)] * 1

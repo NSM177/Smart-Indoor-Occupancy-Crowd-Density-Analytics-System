@@ -154,7 +154,7 @@ class TestVisionAlgorithms(unittest.TestCase):
         cfg = ZoneAnalyzer.load_config_from_json(settings.ZONES_CONFIG_PATH)
         self.assertIsNotNone(cfg)
         assert cfg is not None
-        self.assertGreaterEqual(len(cfg.zones), 3)
+        self.assertEqual(len(cfg.zones), 1)
 
         zone_a = ZoneConfig(
             id="z-a",
@@ -329,7 +329,7 @@ class TestVisionAlgorithms(unittest.TestCase):
             r_zones = client.get("/analytics/zones")
             self.assertEqual(r_zones.status_code, 200)
             self.assertIn("zones", r_zones.json())
-            self.assertGreaterEqual(r_zones.json()["totalZones"], 3)
+            self.assertEqual(r_zones.json()["totalZones"], 1)
 
 
 if __name__ == "__main__":

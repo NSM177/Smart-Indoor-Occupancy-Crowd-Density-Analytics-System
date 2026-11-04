@@ -39,6 +39,7 @@ from app.schemas.vision_schema import (
     ZoneTelemetry,
 )
 from app.services.mqtt_publisher import AiMqttBridge
+from app.services.video_source import SOURCE_DEFAULT, VideoSourceManager
 from app.vision.annotator import FrameAnnotator
 from app.vision.camera_manager import CameraStreamReader
 from app.vision.counter import PeopleCounter
@@ -73,6 +74,15 @@ class VisionPipelineEngine:
             target_width=settings.FRAME_WIDTH,
             target_height=settings.FRAME_HEIGHT,
             target_fps=settings.TARGET_FPS,
+        )
+
+        # Switching input restarts the analytics; done on the pipeline thread because
+        # the tracker and counter are not safe to reset while it is using them.
+        self._reset_analytics_requested = threading.Event()
+        self.video_sources = VideoSourceManager(
+            reader=self.camera_reader,
+            upload_dir=settings.VIDEO_UPLOAD_DIR,
+            on_source_changed=self._reset_analytics_requested.set,
         )
 
         self.detector = PersonDetector(
@@ -275,12 +285,15 @@ class VisionPipelineEngine:
             if cameras:
                 primary_cam = cameras[0]
                 self.camera_reader.camera_id = primary_cam.id
-                self.camera_reader.update_source(
-                    stream_url=primary_cam.streamUrl,
-                    target_width=primary_cam.frameWidth,
-                    target_height=primary_cam.frameHeight,
-                    target_fps=primary_cam.targetFps,
-                )
+                self.video_sources.set_default_source(primary_cam.streamUrl)
+                # A selected demo source stays active until the operator changes it
+                if self.video_sources.mode == SOURCE_DEFAULT:
+                    self.camera_reader.update_source(
+                        stream_url=primary_cam.streamUrl,
+                        target_width=primary_cam.frameWidth,
+                        target_height=primary_cam.frameHeight,
+                        target_fps=primary_cam.targetFps,
+                    )
 
             logger.info(
                 "Updated Vision Config for room '%s' (%s): %d zone(s), %d virtual line(s)",
@@ -446,6 +459,13 @@ class VisionPipelineEngine:
                 self._stop_event.wait(0.05)
                 continue
 
+            if self._reset_analytics_requested.is_set():
+                self._reset_analytics_requested.clear()
+                self.tracker.reset()
+                self.counter.reset()
+                self.heatmap.reset()
+                self.alert_engine.reset()
+
             telemetry = self.process_single_frame(
                 frame=frame, is_hw_connected=is_hw_connected
             )
@@ -525,6 +545,7 @@ class VisionPipelineEngine:
             "mqttConnected": self.mqtt_bridge.is_connected,
             "cameraHardwareConnected": hw_connected,
             "cameraStreamUrl": self.camera_reader.stream_url,
+            "videoSourceMode": self.video_sources.mode,
             "fps": perf.fps or cam_fps,
             "inferenceTimeMs": perf.inferenceTimeMs,
             "processingTimeMs": perf.processingTimeMs,

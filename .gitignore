@@ -28,6 +28,7 @@ mosquitto/log/*
 postgres_data/
 
 # AI weights & temporary outputs
+ai-service/uploads/
 *.pt
 !ai-service/models/.gitkeep
 *.onnx

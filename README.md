@@ -50,3 +50,12 @@ cd iot-service && python -m unittest discover -s tests -v
 # 5. Kiểm thử & Build Frontend React + Vite + TypeScript (7 tests)
 cd frontend && npm test && npm run build
 ```
+
+## 4. Demo Khi Chưa Có Camera Rời
+
+Vào **Live Monitoring → Nguồn Video Phân Tích** (cần đăng nhập Operator hoặc Admin) để chọn nguồn. Khi khởi động, hệ thống luôn dùng **Camera mặc định** (`CAMERA_SOURCE`) như trước.
+
+- **Tải video lên:** chọn file `.mp4`, `.avi`, `.mkv`, `.mov` hoặc `.webm` (tối đa 500 MB, đổi bằng `VIDEO_UPLOAD_MAX_MB`). Video được phát lặp lại như một camera.
+- **Camera laptop:** trình duyệt lấy hình từ webcam rồi gửi cho AI Service. Hãy mở trang bằng `http://localhost:3002` và giữ tab đó mở.
+
+Dữ liệu từ các nguồn demo cũng được lưu vào lịch sử và có thể tạo cảnh báo như camera thật. Đổi nguồn sẽ đặt lại bộ đếm IN/OUT và heatmap.

@@ -22,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.source_routes import router as source_router
 from app.api.routes import router as vision_router
 from app.core.config import settings
 from app.core.logger import get_logger, setup_logging
@@ -69,6 +70,7 @@ app.add_middleware(
 )
 
 app.include_router(vision_router)
+app.include_router(source_router)
 
 
 def run_vision_self_test() -> int:

@@ -24,6 +24,14 @@ class AiServiceSettings(BaseSettings):
     FRAME_HEIGHT: int = 720
     TARGET_FPS: int = 15
 
+    # Demo inputs: uploaded video storage and upload size limit
+    VIDEO_UPLOAD_DIR: str = str(BASE_DIR / "uploads")
+    VIDEO_UPLOAD_MAX_MB: int = 500
+
+    # Access tokens issued by the Backend (must match its JWT settings)
+    JWT_SECRET_KEY: str = "smart_occupancy_super_secret_jwt_key_2026_change_in_prod"
+    JWT_ALGORITHM: str = "HS256"
+
     # Performance Optimization for Raspberry Pi 4/5
     INFERENCE_WIDTH: int = 640
     INFERENCE_HEIGHT: int = 384

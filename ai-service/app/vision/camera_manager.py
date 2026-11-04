@@ -5,6 +5,7 @@ Supports:
 - Raspberry Pi Camera Module (`"picamera"` or V4L2 `/dev/video0` or RTSP/HTTP stream)
 - RTSP / HTTP / MJPEG IP camera streams
 - Local video files (`.mp4`, `.avi`, `.mkv`) for offline testing before deploying to Raspberry Pi
+- Frames pushed from a browser webcam (`"browser"`), since a Docker container cannot open the host camera
 """
 
 from __future__ import annotations
@@ -20,6 +21,27 @@ import numpy as np
 from app.core.logger import get_logger
 
 logger = get_logger("ai.camera_manager")
+
+# `stream_url` value for frames pushed through `push_frame` instead of being read
+BROWSER_SOURCE = "browser"
+# Pushed frames older than this mean the browser stopped sending (tab closed, camera off)
+BROWSER_FRAME_STALE_SEC = 3.0
+
+
+def letterbox_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Fit a frame into width x height keeping its aspect ratio (black bars)."""
+    src_h, src_w = frame.shape[:2]
+    if src_w == width and src_h == height:
+        return frame
+    scale = min(width / src_w, height / src_h)
+    new_w = max(1, int(round(src_w * scale)))
+    new_h = max(1, int(round(src_h * scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    top = (height - new_h) // 2
+    left = (width - new_w) // 2
+    canvas[top : top + new_h, left : left + new_w] = resized
+    return canvas
 
 
 class CameraStreamReader:
@@ -46,6 +68,16 @@ class CameraStreamReader:
         self._thread: Optional[threading.Thread] = None
         self._capture: Optional[cv2.VideoCapture] = None
         self._actual_fps: float = 0.0
+
+        # Runtime source switching (applied on the capture thread)
+        self._pending_switch: Optional[Tuple[str, bool]] = None
+        # Uploaded videos play at their own speed and keep their aspect ratio
+        self._realtime_source: bool = False
+        self._file_frame_interval: Optional[float] = None
+        self._pushed_frame: Optional[np.ndarray] = None
+        self._pushed_frame_ts: float = 0.0
+        self._pushed_count: int = 0
+        self._pushed_window_start: float = time.monotonic()
 
     def _parse_source(self) -> Union[int, str]:
         cleaned = self.stream_url.strip()
@@ -107,6 +139,60 @@ class CameraStreamReader:
             )
             self._release_capture()
 
+    def switch_source(self, stream_url: str, realtime_source: bool = False) -> None:
+        """
+        Change the source at runtime. The capture thread applies it, so the OpenCV
+        capture is never released while that thread is reading from it.
+        """
+        with self._lock:
+            self._pending_switch = (str(stream_url).strip(), realtime_source)
+        if self._thread is None or not self._thread.is_alive():
+            self._apply_pending_switch()
+
+    def _apply_pending_switch(self) -> bool:
+        with self._lock:
+            pending = self._pending_switch
+            self._pending_switch = None
+        if pending is None:
+            return False
+        self._release_capture()
+        self.stream_url, self._realtime_source = pending
+        self._file_frame_interval = None
+        with self._lock:
+            self._pushed_frame = None
+            self._pushed_frame_ts = 0.0
+        logger.info(
+            "Switched camera %s source to '%s'", self.camera_id, self.stream_url
+        )
+        return True
+
+    def push_frame(self, frame: np.ndarray) -> None:
+        """Accept one BGR frame from an external producer (browser webcam)."""
+        fitted = letterbox_frame(frame, self.target_width, self.target_height)
+        now = time.monotonic()
+        with self._lock:
+            self._pushed_frame = fitted
+            self._pushed_frame_ts = now
+            self._pushed_count += 1
+            elapsed = now - self._pushed_window_start
+            if elapsed >= 1.0:
+                self._actual_fps = round(self._pushed_count / elapsed, 1)
+                self._pushed_count = 0
+                self._pushed_window_start = now
+
+    def _publish_pushed_frame(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            pushed = self._pushed_frame
+            fresh = (
+                pushed is not None
+                and (now - self._pushed_frame_ts) <= BROWSER_FRAME_STALE_SEC
+            )
+        frame = pushed if fresh else self._build_standby_frame()
+        with self._lock:
+            self._frame = frame
+            self._is_hardware_connected = fresh
+
     def _release_capture(self) -> None:
         with self._lock:
             if self._capture is not None:
@@ -129,6 +215,11 @@ class CameraStreamReader:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
                 cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+            elif self._realtime_source:
+                source_fps = cap.get(cv2.CAP_PROP_FPS)
+                self._file_frame_interval = (
+                    1.0 / source_fps if 1.0 <= source_fps <= 120.0 else None
+                )
 
             with self._lock:
                 self._capture = cap
@@ -153,6 +244,14 @@ class CameraStreamReader:
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
+
+            if self._apply_pending_switch():
+                last_retry_ts = 0.0
+
+            if self.stream_url == BROWSER_SOURCE:
+                self._publish_pushed_frame()
+                self._stop_event.wait(frame_interval)
+                continue
 
             if self._capture is None or not self._is_hardware_connected:
                 if loop_start - last_retry_ts >= 5.0:
@@ -189,7 +288,11 @@ class CameraStreamReader:
                 self._stop_event.wait(0.5)
                 continue
 
-            if (
+            if self._realtime_source:
+                raw_frame = letterbox_frame(
+                    raw_frame, self.target_width, self.target_height
+                )
+            elif (
                 raw_frame.shape[1] != self.target_width
                 or raw_frame.shape[0] != self.target_height
             ):
@@ -210,7 +313,9 @@ class CameraStreamReader:
                 self._frame = raw_frame
 
             elapsed_step = time.monotonic() - loop_start
-            sleep_sec = max(0.001, frame_interval - elapsed_step)
+            sleep_sec = max(
+                0.001, (self._file_frame_interval or frame_interval) - elapsed_step
+            )
             self._stop_event.wait(sleep_sec)
 
     def _build_standby_frame(self) -> np.ndarray:

@@ -8,6 +8,7 @@ import {
   OccupancyHistoryQuery,
 } from '../services/occupancyService';
 import { roomService } from '../services/roomService';
+import { VideoSourceMode, videoSourceService } from '../services/videoSourceService';
 import {
   DeviceCommandPayload,
   RoomCreatePayload,
@@ -193,6 +194,27 @@ export function useAiEngineRealtimeQuery(enabled = true) {
     queryFn: () => densityService.getAiEngineCurrent(),
     enabled,
     refetchInterval: realtimeAwareInterval(15_000, 3_000),
+  });
+}
+
+// ============================================================================
+// Video Source (Camera / Uploaded Video / Laptop Webcam) Hooks
+// ============================================================================
+export function useVideoSourceQuery() {
+  return useQuery({
+    queryKey: ['video-source'],
+    queryFn: () => videoSourceService.getStatus(),
+    refetchInterval: 5_000,
+  });
+}
+
+export function useSelectVideoSourceMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: VideoSourceMode) => videoSourceService.select(mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['video-source'] });
+    },
   });
 }
 

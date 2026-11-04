@@ -534,6 +534,19 @@ def test_06_07_occupancy_and_density_calculations(
             z.code: z
             for z in db.query(Zone).filter(Zone.room_id == room.id).all()
         }
+        # Only ZONE_A is seeded; add two more to exercise busiest-zone selection
+        polygon = [{"x": 0.1, "y": 0.1}, {"x": 0.5, "y": 0.1}, {"x": 0.5, "y": 0.5}]
+        for code, area, capacity in (("ZONE_B", 54.0, 27), ("ZONE_C", 30.0, 15)):
+            zones[code] = Zone(
+                room_id=room.id,
+                name=code,
+                code=code,
+                polygon_coordinates=polygon,
+                area_sqm=area,
+                max_capacity=capacity,
+            )
+            db.add(zones[code])
+        db.flush()
         now = datetime.now(timezone.utc)
 
         db.add(
@@ -549,7 +562,7 @@ def test_06_07_occupancy_and_density_calculations(
                 recorded_at=now,
             )
         )
-        # Zone A: 6 people / 36 m² = 0.1667 p/m²
+        # Zone A: 6 people / 120 m² = 0.0500 p/m²
         # Zone B: 27 people / 54 m² = 0.5000 p/m² (BUSIEST ZONE)
         # Zone C: 3 people / 30 m² = 0.1000 p/m²
         db.add_all(

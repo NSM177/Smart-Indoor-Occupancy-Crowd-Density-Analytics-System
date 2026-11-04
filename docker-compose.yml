@@ -93,6 +93,8 @@ services:
       AI_SERVICE_HOST: 0.0.0.0
       AI_SERVICE_PORT: 8000
       BACKEND_INTERNAL_URL: http://backend:4000/api/v1
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-smart_occupancy_super_secret_jwt_key_2026_change_in_prod}
+      VIDEO_UPLOAD_MAX_MB: ${VIDEO_UPLOAD_MAX_MB:-500}
       MQTT_HOST: mosquitto
       MQTT_PORT: 1883
       MQTT_USERNAME: ${MQTT_USERNAME:-}

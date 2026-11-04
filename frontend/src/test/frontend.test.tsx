@@ -1,10 +1,21 @@
 import React from 'react';
-import { act, render, renderHook, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { StatCard } from '../components/dashboard/StatCard';
 import { InteractiveFloorPlan } from '../components/monitoring/SpatialWidgets';
+import { VideoSourcePanel } from '../components/monitoring/VideoSourcePanel';
 import { SectionCard, StatusBadge } from '../components/ui/Primitives';
+import { useBrowserCameraStore } from '../lib/browserCamera';
 import { SIDEBAR_NAV_ITEMS } from '../layouts/MainLayout';
+import { videoSourceService } from '../services/videoSourceService';
 import { useAuthStore } from '../stores/authStore';
 import { useLiveRoomMetrics, useRealtimeStore } from '../stores/realtimeStore';
 import { useUIStore } from '../stores/uiStore';
@@ -263,5 +274,76 @@ describe('Realtime rendering performance (Phase 1)', () => {
     expect(canvas).not.toBeNull();
     expect(canvas?.getAttribute('width')).toBe('2');
     expect(canvas?.getAttribute('height')).toBe('2');
+  });
+});
+
+describe('Video source selection (demo inputs)', () => {
+  function renderPanel() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={client}>
+        <VideoSourcePanel />
+      </QueryClientProvider>,
+    );
+  }
+
+  it('offers the three sources and asks anonymous users to log in', async () => {
+    useAuthStore.getState().clearSession();
+    vi.spyOn(videoSourceService, 'getStatus').mockResolvedValue({
+      mode: 'default',
+      connected: false,
+      fps: 0,
+      uploaded_video: null,
+      default_source: '0',
+    });
+
+    renderPanel();
+
+    expect(await screen.findByText(/Đang dùng camera đã cấu hình \(0\)/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Camera mặc định/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Tải video lên/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Camera laptop/ })).toBeDisabled();
+    expect(screen.getByText(/Hãy đăng nhập/)).toBeInTheDocument();
+  });
+
+  it('keeps the current source when the camera cannot be opened', async () => {
+    const select = vi.spyOn(videoSourceService, 'select');
+    vi.spyOn(videoSourceService, 'getStatus').mockResolvedValue({
+      mode: 'default',
+      connected: false,
+      fps: 0,
+      uploaded_video: null,
+      default_source: '0',
+    });
+    useAuthStore.getState().setSession('token', 'refresh', {
+      id: 'u1',
+      username: 'operator',
+      email: 'op@test.local',
+      full_name: 'Operator',
+      role: 'OPERATOR',
+      is_active: true,
+      created_at: '',
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: vi
+          .fn()
+          .mockRejectedValue(new DOMException('denied', 'NotAllowedError')),
+      },
+    });
+
+    renderPanel();
+    const button = await screen.findByRole('button', { name: /Camera laptop/ });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/cấp quyền dùng camera/);
+    expect(select).not.toHaveBeenCalled();
+    expect(useBrowserCameraStore.getState().status).toBe('idle');
+    useBrowserCameraStore.setState({ error: null });
+    useAuthStore.getState().clearSession();
   });
 });

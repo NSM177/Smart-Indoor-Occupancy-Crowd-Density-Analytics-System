@@ -10,6 +10,7 @@ import {
   Video,
 } from 'lucide-react';
 import { LiveCameraFeed } from '../../components/monitoring/SpatialWidgets';
+import { VideoSourcePanel } from '../../components/monitoring/VideoSourcePanel';
 import {
   LoadingState,
   SectionCard,
@@ -168,6 +169,8 @@ export const LiveMonitoringPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <VideoSourcePanel />
 
       {/* Main Split View: Camera Viewport (2 cols) + Live Zone List (1 col) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
