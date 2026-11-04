@@ -20,6 +20,14 @@ Ví dụ:
     python video_people_counter.py --source room.mp4
     python video_people_counter.py --source door.mp4 --line 0,0.5,1,0.5
     python video_people_counter.py --source room.mp4 --model yolov8s.pt --conf 0.4 --show
+
+Video lớn (1080p, 4K...):
+    # Mặc định tự thu nhỏ nếu cạnh dài nhất > 1280 px (giữ tỉ lệ)
+    python video_people_counter.py --source big_4k.mp4
+    # Thu nhỏ còn tối đa 960 px cho chạy nhanh hơn trên CPU
+    python video_people_counter.py --source big_4k.mp4 --max-size 960
+    # Giữ nguyên kích thước gốc
+    python video_people_counter.py --source big_4k.mp4 --max-size 0
 """
 
 import argparse
@@ -146,14 +154,37 @@ def draw_hud(frame, counter, current, fps_proc):
         cv2.putText(frame, text, (18, 34 + i * 26), cv2.FONT_HERSHEY_SIMPLEX, 0.62, c, 2, cv2.LINE_AA)
 
 
-def parse_line(text, width, height):
-    """'x1,y1,x2,y2' – giá trị <= 1 hiểu là tỉ lệ theo kích thước ảnh, ngược lại là pixel."""
+def compute_resize(width, height, max_size):
+    """
+    Nếu cạnh dài nhất của video lớn hơn max_size thì thu nhỏ (giữ tỉ lệ khung hình).
+    max_size <= 0 nghĩa là không resize.
+    Trả về (new_width, new_height, scale). Kích thước luôn là số chẵn (codec mp4 yêu cầu).
+    """
+    longest = max(width, height)
+    if max_size <= 0 or longest <= max_size:
+        return width, height, 1.0
+    scale = max_size / longest
+    new_w = max(2, int(round(width * scale / 2)) * 2)
+    new_h = max(2, int(round(height * scale / 2)) * 2)
+    return new_w, new_h, scale
+
+
+def parse_line(text, width, height, scale=1.0):
+    """
+    'x1,y1,x2,y2'
+      - Tất cả giá trị trong khoảng 0-1: hiểu là tỉ lệ theo kích thước ảnh.
+      - Ngược lại: hiểu là pixel của VIDEO GỐC (tự động nhân với scale khi video bị resize).
+    Trả về toạ độ theo kích thước ảnh đã xử lý.
+    """
     vals = [float(v) for v in text.split(",")]
     if len(vals) != 4:
         raise ValueError("--line cần đúng 4 số: x1,y1,x2,y2")
     if all(0 <= v <= 1 for v in vals):
-        vals = [vals[0] * width, vals[1] * height, vals[2] * width, vals[3] * height]
-    return (int(vals[0]), int(vals[1])), (int(vals[2]), int(vals[3]))
+        px = [vals[0] * width, vals[1] * height, vals[2] * width, vals[3] * height]
+    else:
+        px = vals
+    px = [v * scale for v in px]
+    return (int(px[0]), int(px[1])), (int(px[2]), int(px[3]))
 
 
 # --------------------------------------------------------------------------- #
@@ -165,7 +196,11 @@ def main():
     ap.add_argument("--model", default="yolov8n.pt", help="trọng số YOLO (yolov8n.pt nhẹ nhất, yolov8s/m chính xác hơn)")
     ap.add_argument("--conf", type=float, default=0.35, help="ngưỡng confidence")
     ap.add_argument("--iou", type=float, default=0.5, help="ngưỡng IoU cho NMS")
-    ap.add_argument("--imgsz", type=int, default=640, help="kích thước ảnh đưa vào model")
+    ap.add_argument("--max-size", type=int, default=1280,
+                    help="tự resize nếu cạnh dài nhất của video lớn hơn giá trị này (giữ tỉ lệ). "
+                         "Mặc định 1280, đặt 0 để giữ nguyên kích thước gốc")
+    ap.add_argument("--imgsz", type=int, default=640,
+                    help="kích thước ảnh đưa vào model (video nhiều người nhỏ/xa nên tăng lên 960 hoặc 1280)")
     ap.add_argument("--device", default=None, help="cpu | 0 (GPU) | mps ... (mặc định tự chọn)")
     ap.add_argument("--stride", type=int, default=1, help="xử lý mỗi N frame (tăng để chạy nhanh hơn trên CPU)")
     ap.add_argument("--line", default=None, help="vạch đếm IN/OUT 'x1,y1,x2,y2' (tỉ lệ 0-1 hoặc pixel), vd 0,0.5,1,0.5")
@@ -190,7 +225,10 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-    line = parse_line(args.line, width, height) if args.line else None
+    proc_w, proc_h, scale = compute_resize(width, height, args.max_size)
+    resized = scale < 1.0
+
+    line = parse_line(args.line, width, height, scale) if args.line else None
     low, mid = (int(v) for v in args.density.split(","))
     counter = PeopleCounter(line=line, min_hits=args.min_hits, flip=args.flip, density_thresholds=(low, mid))
 
@@ -204,7 +242,7 @@ def main():
     writer = None
     if not args.no_video:
         writer = cv2.VideoWriter(
-            str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps / max(args.stride, 1), (width, height)
+            str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), fps / max(args.stride, 1), (proc_w, proc_h)
         )
 
     model = YOLO(args.model)
@@ -214,6 +252,11 @@ def main():
     csv_writer.writerow(["frame", "time_s", "current", "unique", "in", "out"])
 
     print(f"Video: {src}  |  {width}x{height}  |  {fps:.1f} fps  |  {total_frames} frames")
+    if resized:
+        print(f"Resize: {width}x{height} -> {proc_w}x{proc_h} (x{scale:.2f}, --max-size {args.max_size})")
+    else:
+        print(f"Resize: không cần (cạnh dài nhất <= {args.max_size})" if args.max_size > 0
+              else "Resize: tắt, giữ kích thước gốc")
     t_start = time.time()
     frame_idx = 0
     processed = 0
@@ -227,6 +270,9 @@ def main():
             frame_idx += 1
             if (frame_idx - 1) % args.stride != 0:
                 continue
+
+            if resized:
+                frame = cv2.resize(frame, (proc_w, proc_h), interpolation=cv2.INTER_AREA)
 
             t0 = time.time()
             results = model.track(
@@ -303,6 +349,8 @@ def main():
         "average_in_frame": round(counter.average, 2),
         "line_in": counter.count_in if line else None,
         "line_out": counter.count_out if line else None,
+        "original_size": f"{width}x{height}",
+        "processed_size": f"{proc_w}x{proc_h}",
         "model": args.model,
         "conf": args.conf,
         "processing_time_s": round(time.time() - t_start, 1),
